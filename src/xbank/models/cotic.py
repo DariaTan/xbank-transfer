@@ -34,12 +34,10 @@ def _patch_pl_compat() -> None:
     call, but which still runs on import since it's the package __init__)
     type-hints a function argument as `pl.loggers.LightningLoggerBase`.
     That class was renamed to `pl.loggers.Logger` well before our pinned
-    pytorch-lightning==2.6.5 (COTIC's own requirements.txt pins 1.6.1) --
-    without this shim, importing anything from `src.utils.*` raises
-    `AttributeError: module 'pytorch_lightning.loggers' has no attribute
-    'LightningLoggerBase'` at COTIC's package-init time. Patched here
-    instead of editing third_party/COTIC directly, since that's a clean
-    upstream clone we don't want to fork.
+    pytorch-lightning==2.6.5 without this shim, importing anything from 
+    `src.utils.*` raises `AttributeError: module 'pytorch_lightning.loggers'
+    has no attribute 'LightningLoggerBase'` at COTIC's package-init time. 
+    Patched here instead of editing third_party/COTIC directly.
     """
     if not hasattr(pl.loggers, "LightningLoggerBase"):
         pl.loggers.LightningLoggerBase = pl.loggers.Logger

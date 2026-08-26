@@ -44,9 +44,3 @@ targets:
   kind: binary product-purchase flags, monthly
   period: "12 months of 2022"
   split: "5-fold out-of-fold: 4 folds train, 1 fold test, both public"
-  # Structurally close to xbank's own 4 monthly binary targets (col_2..col_5
-  # in targets_anonym_encoded.parquet) -- same local-task shape, so the
-  # xbank embedding-extraction protocol (history up to t, hidden state at t)
-  # should carry over to MBD's targets without redesigning it.
-
-hardware_note: "paper states >=1x32GB GPU, 4 CPU cores, 96GB RAM for their own benchmark harness -- not necessarily what our adapters need, just their reported baseline requirement"

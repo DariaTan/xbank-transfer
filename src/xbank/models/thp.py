@@ -23,12 +23,20 @@ def build_tokenizer(num_types: int, max_len: int) -> EventTokenizer:
     """pad_token_id = num_types: real event ids are 0..num_types-1, the
     next free index is reserved for padding (num_event_types_pad =
     num_types + 1) -- EasyTPP's own convention, not ours.
+
+    truncation_strategy=None -> easy_tpp.preprocess.dataset.get_data_loader
+    resolves this to `truncation=False` in the collator, so no sequence is
+    ever truncated here regardless of length -- the actual cap comes from
+    `cap_rows_per_client` upstream, which already keeps at most `max_len`
+    of each client's most recent rows before sequences are built. No
+    truncation_side to set for the same reason (there's deliberately no
+    truncation_side kwarg here -- it would sit unused, same as `use_ln` in
+    build_model).
     """
     data_spec = DataSpecConfig(
         num_event_types=num_types,
         pad_token_id=num_types,
         padding_side="right",
-        truncation_side="right",
         padding_strategy=None,
         truncation_strategy=None,
         max_len=max_len,

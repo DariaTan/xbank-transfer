@@ -9,8 +9,8 @@ this as a working hypothesis to revisit if a model behaves unexpectedly on
 a given column, not as ground truth from a data dictionary.
 
 col_1  DATE     event date, range 2022-01-03 .. 2024-01-31
-col_2  52 vals  category / MCC-like group code   (confirmed by report.html)
-col_3  257 vals category, finer-grained than col_2 (merchant? sub-category?)
+col_2  52 vals  category / MCC-like group code
+col_3  257 vals category, finer-grained than col_2
 col_4  2 vals   binary flag
 col_5  4 vals   category
 col_6  21 vals  category
@@ -19,17 +19,11 @@ col_8  4 vals   category
 col_9  6 vals   category
 col_10 27 vals  category
 col_11 ~11.2M   continuous, range [0, 1] -- likely a normalized amount
-col_12 ~9.7M    continuous, range [0, 1] -- likely a second normalized
-                amount-derived feature (running ratio/average?)
+col_12 ~9.7M    continuous, range [0, 1] -- likely a second normalized feature
 col_13 6 vals   low-cardinality float in [0, 1] -- looks quantized/binned
 col_14 6 vals   same pattern as col_13
 col_15 6 vals   same pattern as col_13
 col_16 5 vals   same pattern as col_13
-
-`id` is the client identifier (hashed string, 378,305 distinct in this file
--- fewer than the 426,772 clients in targets_anonym_encoded.parquet, i.e.
-some target clients have zero transactions in this window; not resolved
-yet, doesn't block unsupervised pretraining).
 """
 
 CLIENT_ID_COL = "id"

@@ -1,7 +1,7 @@
 """NEP: from-scratch decoder-only causal transformer for next-event
-prediction over the full xbank feature set.
+prediction.
 
-No existing repo to adapt (see project notes) -- this reuses HF
+No existing repo to adapt -- this reuses HF
 `transformers`' own `LlamaModel` for the actual attention/RoPE/GQA
 implementation (Llama-style architecture per the NVIDIA transaction-FM
 blueprint this design is modeled on) fed our own per-event feature

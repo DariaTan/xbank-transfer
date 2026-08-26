@@ -25,7 +25,10 @@ Mounts the repo root at `/app`, the raw transaction data
 `/root/.cache/huggingface` -- Chronos-2 downloads a real pretrained
 checkpoint from the HF Hub (public weights, Apache-2.0, not proprietary
 data) on first use; without this mount it silently re-downloads every
-time the container is recreated. `HF_HOME` is set to match.
+time the container is recreated. `HF_HOME` is set to match. `PYTHONPATH`
+is set to `/app/src` so `xbank.*` is importable from anywhere in the
+container -- the smoke/train entry-point scripts live inside the package
+itself at `src/xbank/training/`, not a separate top-level `scripts/`.
 
 Both host GPUs (RTX A5000, 24GB each) are shared with other users' containers on
 this box -- pass `GPUS='"device=0"'` before `drun.sh` to grab only one:
@@ -60,5 +63,5 @@ from the published PyPI wheel) -- applied automatically by the Dockerfile
 after `pip install`. See `environments/patches/README.md` for what's
 actually wrong upstream and why. Verified against a from-scratch rebuild,
 not just a live-patched container -- `docker exec xbank-transfer python
-scripts/smoke_coles.py` works right after `dbuild.sh` + `drun.sh` with no
-manual steps.
+src/xbank/training/smoke_coles.py` works right after `dbuild.sh` +
+`drun.sh` with no manual steps.

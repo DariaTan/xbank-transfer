@@ -4,7 +4,7 @@ Uses duckdb to sample/filter directly on the parquet file (91.5M rows,
 378K clients) rather than loading the whole table into pandas -- only the
 sampled clients' rows ever become a pandas DataFrame.
 """
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import duckdb
 import numpy as np
@@ -46,6 +46,18 @@ def load_raw_for_clients(parquet_path: str, client_ids: List[str]) -> pd.DataFra
         f"({', '.join('?' * len(client_ids))})",
         [parquet_path, *client_ids],
     ).df()
+
+
+def load_all_raw(parquet_path: str, columns: Optional[List[str]] = None) -> pd.DataFrame:
+    """Load the full transactions table -- every client, not a sample --
+    for full-scale training runs. `columns` projects to a subset (e.g. just
+    id/event_time/event_type for COTIC/THP, which only use one mark column)
+    to cut memory for models that don't need the other columns; omit for
+    all columns.
+    """
+    con = duckdb.connect()
+    col_list = ", ".join(columns) if columns else "*"
+    return con.execute(f"SELECT {col_list} FROM read_parquet(?)", [parquet_path]).df()
 
 
 def cap_rows_per_client(df: pd.DataFrame, max_seq_len: int) -> pd.DataFrame:

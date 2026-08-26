@@ -13,6 +13,11 @@
 # proprietary data), and without this mount it silently re-downloads
 # every time the container is recreated.
 #
+# PYTHONPATH=/app/src makes `xbank.*` importable from anywhere in the
+# container (no per-script sys.path hack needed) -- src/xbank/training/
+# holds the smoke_*.py / train_*.py entry-point scripts directly inside
+# the package now, run as e.g. `python src/xbank/training/train_thp.py`.
+#
 # This host has 2x RTX A5000 (24GB each) shared with other users' containers.
 # Override GPUS to grab just one, e.g.:  GPUS='"device=0"' ./drun.sh
 set -euo pipefail
@@ -45,6 +50,7 @@ docker run -d \
     -v "${DATA_DIR}:/app/data:ro" \
     -v "${HF_CACHE_DIR}:/root/.cache/huggingface" \
     -e HF_HOME=/root/.cache/huggingface \
+    -e PYTHONPATH=/app/src \
     -w /app \
     "${IMAGE_NAME}" \
     tail -f /dev/null
