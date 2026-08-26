@@ -1,0 +1,52 @@
+# MBD (Multimodal Banking Dataset, Sber AI Lab, ACM CIKM 2025 -- arXiv:2409.17587).
+# Role in this project: cross-institution / cross-segment TRANSFER TARGET
+# only. No pretraining happens on this data -- the FM is pretrained on
+# configs/data/xbank.yaml, then run in frozen inference over MBD to produce
+# embeddings, which are evaluated zero/few-shot against MBD's own targets.
+# This is the reverse of xbank's role (pretrain + own local eval).
+name: mbd
+role: transfer_eval  # not: pretrain
+
+# Facts below verified via web search of the paper/README on 2026-08-26 --
+# NOT yet downloaded to this host, nothing here has been run against real
+# files. Re-verify against the actual data once downloaded.
+source:
+  paper: "https://arxiv.org/abs/2409.17587"
+  repo: "https://github.com/dzhambo/mbd"
+  # README points to a Yandex Disk link + download script; not yet fetched.
+  download_note: "not yet downloaded -- see repo README for the Yandex Disk link and fetch script"
+  format: parquet
+
+scale:
+  clients_total: 1_500_000        # includes unlabeled clients across all modalities
+  clients_labeled: 1_000_000      # subset with the 4 product-purchase targets
+  clients_note: "corporate clients, not retail -- segment mismatch vs xbank's retail-consumer clients"
+  transactions: 950_000_000
+  avg_transactions_per_client: 638
+
+# Transactions modality only (MBD also has geo, support-dialogue embeddings,
+# and product-purchase aggregates -- out of scope here, xbank has no
+# equivalent modalities to align them against).
+transactions_schema:
+  event_time: "transaction-level, hour-of-day precision preserved during anonymization"
+  amount: numeric
+  currency: {cardinality: 15}
+  event_type: {cardinality: 56}      # closest analogue to xbank's col_2 (MCC-like)
+  event_subtype: {cardinality: 62}
+  sender_field_type: {cardinality: "40 - 87000, varies by field"}
+  receiver_field_type: {cardinality: "40 - 87000, varies by field"}
+  note: "16 transaction attributes total per the paper's Table 4 -- only the
+    fields above are confirmed by name; exact column names in the shipped
+    parquet still need checking once downloaded."
+
+targets:
+  n_targets: 4
+  kind: binary product-purchase flags, monthly
+  period: "12 months of 2022"
+  split: "5-fold out-of-fold: 4 folds train, 1 fold test, both public"
+  # Structurally close to xbank's own 4 monthly binary targets (col_2..col_5
+  # in targets_anonym_encoded.parquet) -- same local-task shape, so the
+  # xbank embedding-extraction protocol (history up to t, hidden state at t)
+  # should carry over to MBD's targets without redesigning it.
+
+hardware_note: "paper states >=1x32GB GPU, 4 CPU cores, 96GB RAM for their own benchmark harness -- not necessarily what our adapters need, just their reported baseline requirement"

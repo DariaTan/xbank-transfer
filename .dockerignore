@@ -1,0 +1,9 @@
+.git
+third_party
+data
+outputs
+checkpoints
+wandb
+**/__pycache__
+**/*.pyc
+.venv

@@ -1,0 +1,46 @@
+# Partner-bank ("xbank") transaction data. THIS is the pretraining corpus --
+# the FM (CoLES/COTIC/THP/NEP/MLM) is fit on this data, and it also carries
+# xbank's own local targets for downstream fine-tune/eval. configs/data/mbd.yaml
+# is the separate, held-out cross-institution transfer target: no pretraining
+# happens on it, only frozen-embedding zero/few-shot evaluation.
+#
+# Row unit: verified 2026-08-26 (91,547,558 rows == 91,547,558 distinct
+# combinations of id + col_1 + all 13 categorical columns) -- one row per
+# (client, day, category-combination), with col_11/col_12 as the summed
+# continuous fields. NOT raw per-transaction rows; multiple raw transactions
+# sharing the same day+category-combo are pre-collapsed into one row.
+#
+# Caveat for the TPP models (COTIC/THP/NHP) specifically: col_1 is a bare
+# DATE (day resolution, no time-of-day), unlike MBD's transactions which
+# keep hour-level timestamps. Day-granularity flattens most of the
+# inter-arrival-time signal these models are built to exploit -- fine for
+# CoLES/MLM/NEP, a real limitation to note in the paper for the TPP family
+# when pretraining directly on xbank.
+name: xbank
+
+paths:
+  transactions: /app/data/trans_any_pos_anonym_encoded.parquet
+  targets: /app/data/targets_anonym_encoded.parquet
+
+# Full observed range in the raw data (see src/report.html data overview).
+transactions_range: ["2022-01-01", "2024-01-31"]
+targets_range: ["2023-01-01", "2024-02-29"]
+
+# History window used to build the embedding at each target timestamp.
+# Ceiling is 12 months: transactions start 2022-01 and the earliest target
+# month is 2023-01, so 12 months is all that's available before THAT
+# target -- going longer would only be possible for later target months,
+# making the window length inconsistent across the panel. Swept rather
+# than fixed at the ceiling, since "longer is better" is a hypothesis to
+# test on this data, not an assumption to bake in.
+history_window_months: 12
+history_window_months_sweep: [1, 3, 6, 12]
+
+# Hard cap on events per forward pass, independent of window length --
+# protects the attention-based models (MLM, NEP, THP) from the long right
+# tail of client activity (p90 ~629 events over the full ~25-month history;
+# a 12-month window trims that but doesn't eliminate it). COTIC and CoLES
+# don't need this (convolutional / built for arbitrary-length subsequences)
+# but read the same field for consistency across adapters.
+max_seq_len: 500
+truncation: most_recent  # keep the most recent max_seq_len events within the window
