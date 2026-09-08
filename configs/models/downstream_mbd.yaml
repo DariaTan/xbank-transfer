@@ -1,0 +1,57 @@
+# Shared config for MBD's downstream pipeline (cross-institution transfer
+# target), both stages:
+#   inference: producing frozen per-(client, date) embeddings, zero-shot,
+#              over MBD (src/training/infer_mbd.py)
+#   probe:     training the classification probe on those embeddings,
+#              respecting MBD's own out-of-fold protocol
+#              (src/training/train_downstream_mbd.py)
+# infer_mbd.py also reads each architecture's own params (hidden_size/
+# num_layers/etc, which must match what the checkpoint was trained with)
+# from configs/train/<model>.yaml, not from here -- same split as
+# configs/train/downstream.yaml's xbank counterpart.
+
+inference:
+  n_clients: null   # cap for a quick debug run; null uses all labeled clients
+  seed: 0           # RNG seed for the n_clients debug sample
+  history_window_months: 12
+  max_seq_len: 500
+  batch_size: 256
+  # chronos2 only -- heavier per-sample than the other architectures, so
+  # it gets its own (smaller) batch size and per-date chunking instead of
+  # the shared batch_size above.
+  chronos2_batch_size: 64
+  chronos2_chunk_size: 2000
+  chronos2_value_col: col_11
+  # Base output dir -- infer_mbd.py writes to <embeds_dir>/<model>/,
+  # matching probe.embeds_dir's own convention below.
+  embeds_dir: /app/data/embeds_mbd
+
+# MBD's paper (Sec 4.1) specifies an "out-of-fold validation protocol":
+# 5 CLIENT-DISJOINT folds (client_split/fold=0..4), 4 for training and 1
+# held out -- but does not designate any one fold as canonical (verified
+# by fetching the paper directly, 2026-09-08). So the probe always
+# rotates through every fold present as the held-out test set in turn and
+# reports results aggregated (mean +/- std) across all rotations -- there
+# is no test_fold setting here to pick just one (see RESEARCH_PLAN.md's
+# "ID / date splitting (transfer, MBD)").
+probe:
+  # Optional undersampling cap for the per-target LightGBM/MLP training
+  # set -- same semantics as configs/train/downstream.yaml's max_neg_ratio.
+  max_neg_ratio: null
+
+  embeds_dir: /app/data/embeds_mbd
+  checkpoint_dir: null   # null derives /app/data/downstream_mbd/<model>
+
+  # Fraction of train-fold unique client ids held out for validation
+  # (GroupShuffleSplit -- by id, not by row; already fold-disjoint from
+  # test by construction) and the RNG seed used for that split,
+  # undersampling, and LightGBM.
+  val_frac: 0.15
+  seed: 0
+
+  # MLP hyperparameters.
+  max_epochs: 100
+  patience: 10
+  batch_size: 4096
+  hidden: 256
+  lr: 0.001

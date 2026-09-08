@@ -18,12 +18,14 @@ looked ahead.
 """
 from typing import Dict, List
 
+import numpy as np
 import torch
 import torch.nn as nn
+from ptls.data_load.utils import collate_feature_dict
 from transformers import BertConfig, BertModel
 
-from xbank.models.event_heads import EventPredictionHeads
-from xbank.models.trx_embedding import TrxEmbedding
+from models.event_heads import EventPredictionHeads
+from models.trx_embedding import TrxEmbedding
 
 
 class MLM(nn.Module):
@@ -60,11 +62,11 @@ class MLM(nn.Module):
         """No masking applied -- full given sequence, bidirectionally
         encoded. See module docstring for the no-future-leakage caveat.
         """
-        x = self.trx_embedding(payload)
+        x = self.trx_embedding(payload, attention_mask)
         return self.backbone(inputs_embeds=x, attention_mask=attention_mask).last_hidden_state
 
     def loss(self, payload: Dict[str, torch.Tensor], seq_len_mask: torch.Tensor) -> torch.Tensor:
-        x = self.trx_embedding(payload)
+        x = self.trx_embedding(payload, seq_len_mask)
 
         maskable = seq_len_mask.bool()
         rand_mask = (torch.rand_like(seq_len_mask, dtype=torch.float) < self.mask_prob) & maskable
@@ -85,3 +87,26 @@ def last_event_embedding(hidden: torch.Tensor, seq_len_mask: torch.Tensor) -> to
     lengths = seq_len_mask.sum(dim=1).long()
     idx = (lengths - 1).clamp(min=0)
     return hidden[torch.arange(hidden.size(0), device=hidden.device), idx]
+
+
+def extract_embeddings(
+    model: MLM,
+    records: List[dict],
+    batch_size: int = 256,
+    device: torch.device = torch.device("cpu"),
+) -> np.ndarray:
+    """One embedding per record: the unmasked bidirectional encoding's
+    hidden state at the last real event. Safe from future leakage only
+    because `records` is already truncated to the desired cutoff date
+    upstream (see the module docstring's caveat) -- never call this on a
+    sequence extending past the date an embedding is meant to represent.
+    """
+    model.eval()
+    model.to(device)
+    out = []
+    with torch.no_grad():
+        for i in range(0, len(records), batch_size):
+            batch = collate_feature_dict(records[i : i + batch_size]).to(device)
+            hidden = model.encode(batch.payload, batch.seq_len_mask)
+            out.append(last_event_embedding(hidden, batch.seq_len_mask).cpu().numpy())
+    return np.concatenate(out, axis=0)

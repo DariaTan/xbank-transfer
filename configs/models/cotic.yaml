@@ -1,0 +1,12 @@
+# Run parameters for src/training/train_cotic.py.
+n_clients: null   # cap for a quick debug run; null uses all clients
+max_seq_len: 500
+max_epochs: 100
+patience: 5
+valid_frac: 0.05
+batch_size: 128
+nb_filters: 128
+in_channels: 128
+nb_layers: 6
+seed: 0
+checkpoint_dir: /app/data/checkpoints/cotic

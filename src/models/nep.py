@@ -12,12 +12,14 @@ behavior needed here.
 """
 from typing import Dict, List
 
+import numpy as np
 import torch
 import torch.nn as nn
+from ptls.data_load.utils import collate_feature_dict
 from transformers import LlamaConfig, LlamaModel
 
-from xbank.models.event_heads import EventPredictionHeads
-from xbank.models.trx_embedding import TrxEmbedding
+from models.event_heads import EventPredictionHeads
+from models.trx_embedding import TrxEmbedding
 
 
 class NEP(nn.Module):
@@ -58,11 +60,11 @@ class NEP(nn.Module):
         history up to it), not for the training loss (which shifts by one
         step, see `loss`).
         """
-        x = self.trx_embedding(payload)
+        x = self.trx_embedding(payload, attention_mask)
         return self.backbone(inputs_embeds=x, attention_mask=attention_mask).last_hidden_state
 
     def loss(self, payload: Dict[str, torch.Tensor], seq_len_mask: torch.Tensor) -> torch.Tensor:
-        x = self.trx_embedding(payload)
+        x = self.trx_embedding(payload, seq_len_mask)
         hidden = self.backbone(
             inputs_embeds=x[:, :-1], attention_mask=seq_len_mask[:, :-1]
         ).last_hidden_state
@@ -81,3 +83,26 @@ def last_event_embedding(hidden: torch.Tensor, seq_len_mask: torch.Tensor) -> to
     lengths = seq_len_mask.sum(dim=1).long()
     idx = (lengths - 1).clamp(min=0)
     return hidden[torch.arange(hidden.size(0), device=hidden.device), idx]
+
+
+def extract_embeddings(
+    model: NEP,
+    records: List[dict],
+    batch_size: int = 256,
+    device: torch.device = torch.device("cpu"),
+) -> np.ndarray:
+    """One embedding per record: the full-sequence causal encoding's
+    hidden state at the last real event (see `encode`/`last_event_embedding`
+    docstrings) -- the entire client history in `records` is already
+    truncated to the desired cutoff date upstream (splits.py), so no
+    future-leakage risk here.
+    """
+    model.eval()
+    model.to(device)
+    out = []
+    with torch.no_grad():
+        for i in range(0, len(records), batch_size):
+            batch = collate_feature_dict(records[i : i + batch_size]).to(device)
+            hidden = model.encode(batch.payload, batch.seq_len_mask)
+            out.append(last_event_embedding(hidden, batch.seq_len_mask).cpu().numpy())
+    return np.concatenate(out, axis=0)

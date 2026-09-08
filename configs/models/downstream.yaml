@@ -1,0 +1,68 @@
+# Shared config for xbank's downstream pipeline, both stages:
+#   inference: producing frozen per-(client, date) embeddings
+#              (src/training/infer_{coles,nep,mlm,thp,cotic,chronos2}.py)
+#   probe:     training the classification probe on those embeddings
+#              (src/training/train_downstream.py)
+# Split into two sections since they're two different pipeline stages,
+# not because they can't share a file -- each infer_*.py script also
+# reads its own architecture params (hidden_size/num_layers/etc, which
+# must match what the checkpoint was trained with) from
+# configs/train/<model>.yaml, not from here.
+
+inference:
+  n_clients: null   # cap for a quick debug run; null uses all clients
+  seed: 0           # RNG seed for the n_clients debug sample
+  start_date: "2023-01-01"
+  end_date: "2024-02-01"
+  history_window_months: 12
+  max_seq_len: 500
+  batch_size: 256
+  # chronos2 only -- heavier per-sample than the other five, so it gets
+  # its own (smaller) batch size and per-date chunking instead of the
+  # shared batch_size above.
+  chronos2_batch_size: 64
+  chronos2_chunk_size: 2000
+  chronos2_value_col: col_11
+  # Base output dir -- each infer_*.py writes to <embeds_dir>/<model>/,
+  # matching probe.embeds_dir's own convention below (same directory, two
+  # different pipeline stages: one writes it, the other reads it back).
+  embeds_dir: /app/data/embeds
+
+# Train/test periods for the downstream classification probe. Each bound
+# is a "YYYY-MM" month, inclusive at both ends -- e.g. train.start:
+# "2023-01" includes every target row dated anywhere in January 2023, not
+# just its first day. Test must stay strictly after train so the probe is
+# never evaluated on a period it could have trained on -- the script
+# doesn't enforce this, so keep it in mind when changing these bounds.
+probe:
+  train:
+    start: "2023-01"
+    end: "2023-12"
+  test:
+    start: "2024-01"
+    end: "2024-02"
+
+  # Optional undersampling cap for the per-target LightGBM/MLP training
+  # set: keeps at most this many negatives per positive; a target already
+  # at or below the cap (e.g. col_2, col_4) is left untouched regardless.
+  # null disables undersampling entirely.
+  max_neg_ratio: 20
+
+  # Where embeddings are read from (per-model subfolder) and where
+  # checkpoints/results are written. checkpoint_dir: null derives
+  # /app/data/downstream/<model> from --model.
+  embeds_dir: /app/data/embeds
+  checkpoint_dir: null
+
+  # Fraction of train-period unique client ids held out for validation
+  # (GroupShuffleSplit -- by id, not by row) and the RNG seed used for
+  # that split, undersampling, and LightGBM.
+  val_frac: 0.15
+  seed: 0
+
+  # MLP hyperparameters.
+  max_epochs: 100
+  patience: 10
+  batch_size: 4096
+  hidden: 256
+  lr: 0.001

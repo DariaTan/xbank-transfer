@@ -1,40 +1,49 @@
 """Full-scale NEP training: all xbank clients, early stopping on
 validation loss, resumable checkpointing.
 
-Usage (inside the container; pin a GPU via CUDA_VISIBLE_DEVICES on the
-`docker exec` call, see TRAINING.md):
-    docker exec -e CUDA_VISIBLE_DEVICES=0 xbank-transfer python scripts/train_nep.py
+Run parameters live in configs/models/nep.yaml, not CLI flags -- the
+only flag this script takes is --config, to point at a different one.
 """
 import argparse
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import torch
+import yaml
 from ptls.data_load.utils import collate_feature_dict
+from torch.utils.tensorboard import SummaryWriter
+
+from data.loaders import build_ptls_records, cap_rows_per_client, load_all_raw
+from data.schema import ALL_FEATURE_COLS, CLIENT_ID_COL, EVENT_TIME_COL, NUMERIC_COLS
+from models.nep import NEP
+from training.common import (
+    EarlyStopper,
+    check_or_save_run_config,
+    load_checkpoint,
+    save_checkpoint,
+    save_preprocessor,
+    split_df_by_client,
+)
+
+XBANK_DATA_CONFIG = "/app/configs/data/xbank.yaml"
+with open(XBANK_DATA_CONFIG) as f:
+    TRANSACTIONS_PATH = yaml.safe_load(f)["paths"]["transactions"]
 
 
-from xbank.data.loaders import build_ptls_records, cap_rows_per_client, load_all_raw
-from xbank.data.schema import ALL_FEATURE_COLS, CLIENT_ID_COL, EVENT_TIME_COL, NUMERIC_COLS
-from xbank.models.nep import NEP
-from xbank.training.common import EarlyStopper, load_checkpoint, save_checkpoint, split_indices
-
-TRANSACTIONS_PATH = "/app/data/trans_any_pos_anonym_encoded.parquet"
+def load_config(config_path: str) -> SimpleNamespace:
+    with open(config_path) as f:
+        return SimpleNamespace(**yaml.safe_load(f))
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--n-clients", type=int, default=None, help="cap for a quick debug run; default uses all clients")
-    parser.add_argument("--max-seq-len", type=int, default=500)
-    parser.add_argument("--max-epochs", type=int, default=100)
-    parser.add_argument("--patience", type=int, default=5)
-    parser.add_argument("--valid-frac", type=float, default=0.05)
-    parser.add_argument("--batch-size", type=int, default=256)
-    parser.add_argument("--d-model", type=int, default=128)
-    parser.add_argument("--num-layers", type=int, default=1)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--checkpoint-dir", type=str, default="outputs/checkpoints/nep")
-    args = parser.parse_args()
+    parser.add_argument("--config", type=str, default="/app/configs/models/nep.yaml")
+    cli = parser.parse_args()
+    args = load_config(cli.config)
+
+    ckpt_dir = Path(args.checkpoint_dir)
+    check_or_save_run_config(ckpt_dir, args, ["seed", "valid_frac", "n_clients", "max_seq_len"])
 
     print("Loading full transactions table ...", flush=True)
     df = load_all_raw(TRANSACTIONS_PATH, columns=[CLIENT_ID_COL, EVENT_TIME_COL] + ALL_FEATURE_COLS)
@@ -48,15 +57,27 @@ def main():
     df = cap_rows_per_client(df, args.max_seq_len)
     print(f"  {len(df)} rows after capping to {args.max_seq_len}/client", flush=True)
 
-    print("Building ptls records ...", flush=True)
-    records, preprocessor = build_ptls_records(df)
-    cat_sizes = preprocessor.get_category_dictionary_sizes()
-    print(f"  {len(records)} client records, category dictionary sizes: {cat_sizes}", flush=True)
+    train_df, valid_df = split_df_by_client(df, CLIENT_ID_COL, args.valid_frac, args.seed)
+    print(
+        f"  split into train={train_df[CLIENT_ID_COL].nunique()} clients, "
+        f"valid={valid_df[CLIENT_ID_COL].nunique()} clients (before building records)",
+        flush=True,
+    )
 
-    train_idx, valid_idx = split_indices(len(records), args.valid_frac, args.seed)
-    train_records = [records[i] for i in train_idx]
-    valid_records = [records[i] for i in valid_idx]
-    print(f"  train={len(train_records)} valid={len(valid_records)}", flush=True)
+    print("Building ptls records ...", flush=True)
+    train_records, preprocessor = build_ptls_records(train_df)
+    cat_sizes = preprocessor.get_category_dictionary_sizes()
+    valid_records, _ = build_ptls_records(valid_df, preprocessor=preprocessor)
+    print(
+        f"  train={len(train_records)} valid={len(valid_records)}, "
+        f"category dictionary sizes: {cat_sizes}",
+        flush=True,
+    )
+
+    # Persisted so downstream inference can transform new data with the
+    # SAME category->index mapping this checkpoint's embedding tables were
+    # trained against -- see train_coles.py's identical comment.
+    save_preprocessor(ckpt_dir / "preprocessor.pkl", preprocessor)
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model = NEP(
@@ -64,12 +85,11 @@ def main():
         NUMERIC_COLS,
         d_model=args.d_model,
         num_layers=args.num_layers,
-        max_position_embeddings=args.max_seq_len + 8,
+        max_position_embeddings=args.max_seq_len,
     ).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     stopper = EarlyStopper(patience=args.patience, mode="min")
 
-    ckpt_dir = Path(args.checkpoint_dir)
     last_path, best_path = ckpt_dir / "last.pt", ckpt_dir / "best.pt"
     start_epoch = 0
     if last_path.exists():
@@ -81,6 +101,8 @@ def main():
         for i in range(0, len(order), batch_size):
             chunk = [recs[j] for j in order[i : i + batch_size]]
             yield collate_feature_dict(chunk).to(device)
+
+    writer = SummaryWriter("/app/data/lightning_logs/nep")
 
     for epoch in range(start_epoch, args.max_epochs):
         model.train()
@@ -106,6 +128,8 @@ def main():
         improved = stopper.step(valid_loss, epoch)
         status = "(best)" if improved else f"(no improvement, {stopper.bad_epochs}/{args.patience})"
         print(f"epoch {epoch}: train_loss={train_loss:.4f} valid_loss={valid_loss:.4f}  {status}", flush=True)
+        writer.add_scalar("train/loss", train_loss, epoch)
+        writer.add_scalar("valid/loss", valid_loss, epoch)
 
         save_checkpoint(str(last_path), model, optimizer, epoch, stopper)
         if improved:
@@ -115,6 +139,7 @@ def main():
             print(f"Early stopping at epoch {epoch} (best valid_loss={stopper.best:.4f} @ epoch {stopper.best_epoch})", flush=True)
             break
 
+    writer.close()
     print(f"Done. Best checkpoint: {best_path} (valid_loss={stopper.best:.4f} @ epoch {stopper.best_epoch})", flush=True)
 
 

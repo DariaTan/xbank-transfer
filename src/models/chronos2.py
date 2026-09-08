@@ -7,7 +7,7 @@ public pretrained weights are fetched.
 
 Chronos-2 also differs architecturally from the other five: it's a
 generic time-series FM operating on a single regularly-spaced numeric
-channel (see `xbank.data.loaders.build_chronos_series`), not our
+channel (see `data.loaders.build_chronos_series`), not our
 multi-column per-event feature set.
 """
 from typing import List

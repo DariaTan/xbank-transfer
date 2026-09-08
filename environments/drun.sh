@@ -5,7 +5,9 @@
 #
 # Mounts:
 #   repo root                               -> /app                    (project code, editable live)
-#   /mnt/storage/d.tanyushkina/transactions -> /app/data               (read-only, avoids clobbering the raw parquet)
+#   /mnt/storage/d.tanyushkina/transactions -> /app/data               (read-write, so downstream embeds can be
+#                                                                        written under /app/data/embeds; be careful
+#                                                                        not to touch the raw parquet files here)
 #   /mnt/storage/d.tanyushkina/hf_cache     -> /root/.cache/huggingface (read-write, survives container recreation)
 #
 # The HF cache mount matters for Chronos-2: it's a real pretrained
@@ -13,10 +15,13 @@
 # proprietary data), and without this mount it silently re-downloads
 # every time the container is recreated.
 #
-# PYTHONPATH=/app/src makes `xbank.*` importable from anywhere in the
-# container (no per-script sys.path hack needed) -- src/xbank/training/
-# holds the smoke_*.py / train_*.py entry-point scripts directly inside
-# the package now, run as e.g. `python src/xbank/training/train_thp.py`.
+# PYTHONPATH=/app/src makes `data.*`/`models.*`/`training.*` importable
+# from anywhere in the container (no per-script sys.path hack needed) --
+# src/training/ holds the smoke_*.py / train_*.py entry-point scripts
+# directly, run as e.g. `python src/training/train_thp.py`.
+#
+# Port 6006 (host) -> 6006 (container) for TensorBoard -- see TRAINING.md
+# for the access command (docker exec + SSH port forward).
 #
 # This host has 2x RTX A5000 (24GB each) shared with other users' containers.
 # Override GPUS to grab just one, e.g.:  GPUS='"device=0"' ./drun.sh
@@ -47,10 +52,11 @@ docker run -d \
     --gpus "${GPUS}" \
     --shm-size=16g \
     -v "${REPO_DIR}:/app" \
-    -v "${DATA_DIR}:/app/data:ro" \
+    -v "${DATA_DIR}:/app/data" \
     -v "${HF_CACHE_DIR}:/root/.cache/huggingface" \
     -e HF_HOME=/root/.cache/huggingface \
     -e PYTHONPATH=/app/src \
+    -p 6006:6006 \
     -w /app \
     "${IMAGE_NAME}" \
     tail -f /dev/null

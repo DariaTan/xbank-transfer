@@ -2,13 +2,15 @@
 from functools import partial
 from typing import Dict, List
 
+import numpy as np
 import torch
+from ptls.data_load.utils import collate_feature_dict
 from ptls.frames import PtlsDataModule
 from ptls.frames.coles import ColesDataset, CoLESModule
 from ptls.frames.coles.split_strategy import SampleSlices
 from ptls.nn import RnnSeqEncoder, TrxEncoder
 
-from xbank.data.schema import CATEGORY_COLS, NUMERIC_COLS
+from data.schema import CATEGORY_COLS, NUMERIC_COLS
 
 
 def build_seq_encoder(
@@ -82,3 +84,25 @@ def build_datamodule(
         valid_batch_size=batch_size,
         valid_num_workers=num_workers,
     )
+
+
+def extract_embeddings(
+    module: CoLESModule,
+    records: List[dict],
+    batch_size: int = 256,
+    device: torch.device = torch.device("cpu"),
+) -> np.ndarray:
+    """One embedding per record: `seq_encoder`'s own pooled output over the
+    FULL sequence (no splitter -- that's a training-time augmentation, not
+    used at inference), same `is_reduce_sequence=True` default pooling
+    CoLES trains against, so this is exactly the representation the
+    contrastive loss was shaping.
+    """
+    module.eval()
+    seq_encoder = module.seq_encoder.to(device)
+    out = []
+    with torch.no_grad():
+        for i in range(0, len(records), batch_size):
+            batch = collate_feature_dict(records[i : i + batch_size]).to(device)
+            out.append(seq_encoder(batch).cpu().numpy())
+    return np.concatenate(out, axis=0)

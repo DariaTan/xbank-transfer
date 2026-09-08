@@ -1,0 +1,12 @@
+# Run parameters for src/training/train_coles.py.
+n_clients: null   # cap for a quick debug run; null uses all clients
+max_seq_len: 500
+max_epochs: 100
+patience: 5
+valid_frac: 0.05
+batch_size: 256
+hidden_size: 128
+embedding_dim: 32
+num_layers: 2
+seed: 0
+checkpoint_dir: /app/data/checkpoints/coles

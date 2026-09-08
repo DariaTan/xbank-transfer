@@ -44,8 +44,8 @@ pandas then tries to assemble a date from year/month/day *columns* and
 raises `ValueError: to assemble mappings requires at least that [year,
 month, day] be specified`. `ColIdentityEncoder` (used by
 `event_time_transformation="none"`) re-extracts the Series correctly, so
-`xbank.data.loaders.build_ptls_records` precomputes the numeric event
+`data.loaders.build_ptls_records` precomputes the numeric event
 time itself with `ptls.preprocessing.util.dt_to_timestamp` and passes
 `event_time_transformation="none"`. No site-packages patch needed for
-this one -- see the docstring in `src/xbank/data/loaders.py` for the
+this one -- see the docstring in `src/data/loaders.py` for the
 full explanation.

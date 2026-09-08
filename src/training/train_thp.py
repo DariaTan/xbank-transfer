@@ -3,43 +3,52 @@ stopping on validation NLL, resumable checkpointing so a killed job (GPU
 preempted, tmux session killed, host reboot) can continue instead of
 restarting from scratch.
 
-Usage (inside the container; pin a GPU via CUDA_VISIBLE_DEVICES on the
-`docker exec` call, see TRAINING.md):
-    docker exec -e CUDA_VISIBLE_DEVICES=0 xbank-transfer python scripts/train_thp.py
+Run parameters live in configs/models/thp.yaml, not CLI flags -- the
+only flag this script takes is --config, to point at a different one.
 """
 import argparse
 from pathlib import Path
+from types import SimpleNamespace
 
+import numpy as np
 import torch
+import yaml
+from torch.utils.tensorboard import SummaryWriter
 
-
-from xbank.data.loaders import build_thp_sequences, cap_rows_per_client, load_all_raw
-from xbank.models.thp import (
+from data.loaders import build_thp_sequences, cap_rows_per_client, load_all_raw
+from models.thp import (
     build_dataloader,
     build_model,
     build_tokenizer,
     evaluate,
     train_one_epoch,
 )
-from xbank.training.common import EarlyStopper, load_checkpoint, save_checkpoint, split_indices
+from training.common import (
+    EarlyStopper,
+    check_or_save_run_config,
+    load_checkpoint,
+    save_checkpoint,
+    split_df_by_client,
+)
 
-TRANSACTIONS_PATH = "/app/data/trans_any_pos_anonym_encoded.parquet"
+XBANK_DATA_CONFIG = "/app/configs/data/xbank.yaml"
+with open(XBANK_DATA_CONFIG) as f:
+    TRANSACTIONS_PATH = yaml.safe_load(f)["paths"]["transactions"]
+
+
+def load_config(config_path: str) -> SimpleNamespace:
+    with open(config_path) as f:
+        return SimpleNamespace(**yaml.safe_load(f))
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--n-clients", type=int, default=None, help="cap for a quick debug run; default uses all clients")
-    parser.add_argument("--max-seq-len", type=int, default=500)
-    parser.add_argument("--max-epochs", type=int, default=100)
-    parser.add_argument("--patience", type=int, default=5)
-    parser.add_argument("--valid-frac", type=float, default=0.05)
-    parser.add_argument("--batch-size", type=int, default=256)
-    parser.add_argument("--hidden-size", type=int, default=128)
-    parser.add_argument("--num-layers", type=int, default=4)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--checkpoint-dir", type=str, default="outputs/checkpoints/thp")
-    args = parser.parse_args()
+    parser.add_argument("--config", type=str, default="/app/configs/models/thp.yaml")
+    cli = parser.parse_args()
+    args = load_config(cli.config)
+
+    ckpt_dir = Path(args.checkpoint_dir)
+    check_or_save_run_config(ckpt_dir, args, ["seed", "valid_frac", "n_clients", "max_seq_len"])
 
     print("Loading full transactions table (id, col_1, col_2) ...", flush=True)
     df = load_all_raw(TRANSACTIONS_PATH, columns=["id", "col_1", "col_2"])
@@ -53,26 +62,28 @@ def main():
     df = cap_rows_per_client(df, args.max_seq_len)
     print(f"  {len(df)} rows after capping to {args.max_seq_len}/client", flush=True)
 
+    train_df, valid_df = split_df_by_client(df, "id", args.valid_frac, args.seed)
+    print(
+        f"  split into train={train_df['id'].nunique()} clients, "
+        f"valid={valid_df['id'].nunique()} clients (before building sequences)",
+        flush=True,
+    )
+
     print("Building THP (time, time_delta, type) sequences ...", flush=True)
-    time_seqs, time_delta_seqs, type_seqs, num_types = build_thp_sequences(df)
-    print(f"  {len(time_seqs)} client sequences, num_types={num_types}", flush=True)
-
-    train_idx, valid_idx = split_indices(len(time_seqs), args.valid_frac, args.seed)
-
-    def subset(lst, ids):
-        return [lst[i] for i in ids]
-
-    train_time, train_delta, train_type = (
-        subset(time_seqs, train_idx),
-        subset(time_delta_seqs, train_idx),
-        subset(type_seqs, train_idx),
+    train_time, train_delta, train_type, num_types, categories, _ = build_thp_sequences(train_df)
+    valid_time, valid_delta, valid_type, _, _, _ = build_thp_sequences(valid_df, categories=categories)
+    print(
+        f"  train={len(train_time)} valid={len(valid_time)}, num_types={num_types}",
+        flush=True,
     )
-    valid_time, valid_delta, valid_type = (
-        subset(time_seqs, valid_idx),
-        subset(time_delta_seqs, valid_idx),
-        subset(type_seqs, valid_idx),
-    )
-    print(f"  train={len(train_time)} valid={len(valid_time)}", flush=True)
+
+    # Persisted so downstream inference maps event types (col_2) to the
+    # SAME ids this checkpoint's layer_type_emb/intensity heads were
+    # trained against -- fitting `pd.factorize` fresh on different data
+    # would silently produce a different mapping (same class of bug as
+    # ptls's category vocabulary, see train_coles.py's identical comment).
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    np.save(ckpt_dir / "categories.npy", categories)
 
     tokenizer = build_tokenizer(num_types, max_len=args.max_seq_len)
     train_loader = build_dataloader(train_time, train_delta, train_type, tokenizer, args.batch_size, shuffle=True)
@@ -84,12 +95,13 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     stopper = EarlyStopper(patience=args.patience, mode="min")  # lower NLL is better
 
-    ckpt_dir = Path(args.checkpoint_dir)
     last_path, best_path = ckpt_dir / "last.pt", ckpt_dir / "best.pt"
     start_epoch = 0
     if last_path.exists():
         start_epoch = load_checkpoint(str(last_path), model, optimizer, stopper, device)
         print(f"Resuming from checkpoint at epoch {start_epoch} (best={stopper.best:.4f} @ {stopper.best_epoch})", flush=True)
+
+    writer = SummaryWriter("/app/data/lightning_logs/thp")
 
     for epoch in range(start_epoch, args.max_epochs):
         train_nll = train_one_epoch(model, train_loader, optimizer)
@@ -97,6 +109,8 @@ def main():
         improved = stopper.step(valid_nll, epoch)
         status = "(best)" if improved else f"(no improvement, {stopper.bad_epochs}/{args.patience})"
         print(f"epoch {epoch}: train_nll={train_nll:.4f} valid_nll={valid_nll:.4f}  {status}", flush=True)
+        writer.add_scalar("train/nll", train_nll, epoch)
+        writer.add_scalar("valid/nll", valid_nll, epoch)
 
         save_checkpoint(str(last_path), model, optimizer, epoch, stopper)
         if improved:
@@ -106,6 +120,7 @@ def main():
             print(f"Early stopping at epoch {epoch} (best valid_nll={stopper.best:.4f} @ epoch {stopper.best_epoch})", flush=True)
             break
 
+    writer.close()
     print(f"Done. Best checkpoint: {best_path} (valid_nll={stopper.best:.4f} @ epoch {stopper.best_epoch})", flush=True)
 
 

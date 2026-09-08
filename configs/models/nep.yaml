@@ -1,0 +1,12 @@
+# Run parameters for src/training/train_nep.py.
+n_clients: null   # cap for a quick debug run; null uses all clients
+max_seq_len: 500
+max_epochs: 100
+patience: 5
+valid_frac: 0.05
+batch_size: 256
+d_model: 128
+num_layers: 1
+lr: 0.001
+seed: 0
+checkpoint_dir: /app/data/checkpoints/nep

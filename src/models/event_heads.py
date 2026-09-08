@@ -47,13 +47,21 @@ class EventPredictionHeads(nn.Module):
         shift or the MLM mask-position gather before calling this).
         `supervise_mask` (B, T) selects which positions actually count
         (non-pad AND, for NEP, not the last position with no "next").
+
+        Category targets are cast to `.long()` before cross_entropy --
+        same real fix as TrxEmbedding's embedding-lookup cast (see its
+        docstring): pytorch-lifestream's FrequencyEncoder can hand back a
+        float64 column when a category value isn't in the fitted
+        vocabulary (fillna doesn't restore the int dtype after the
+        map-to-NaN), and cross_entropy's target argument rejects
+        non-integer dtypes the same way nn.Embedding's indices do.
         """
         denom = supervise_mask.sum().clamp(min=1)
         total = torch.zeros((), device=supervise_mask.device)
 
         for col, logits in cat_logits.items():
             ce = F.cross_entropy(
-                logits.transpose(1, 2), targets[col], reduction="none"
+                logits.transpose(1, 2), targets[col].long(), reduction="none"
             )
             total = total + (ce * supervise_mask).sum() / denom
 

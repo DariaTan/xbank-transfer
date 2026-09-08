@@ -13,7 +13,7 @@ import torch
 from ptls.preprocessing import PandasDataPreprocessor
 from ptls.preprocessing.util import dt_to_timestamp
 
-from xbank.data.schema import (
+from data.schema import (
     CLIENT_ID_COL,
     EVENT_TIME_COL,
     CATEGORY_COLS,
@@ -54,10 +54,19 @@ def load_all_raw(parquet_path: str, columns: Optional[List[str]] = None) -> pd.D
     id/event_time/event_type for COTIC/THP, which only use one mark column)
     to cut memory for models that don't need the other columns; omit for
     all columns.
+
+    `ORDER BY` on the client id pins row order across runs -- without it,
+    DuckDB's parallel scan gives no ordering guarantee, which matters
+    because callers doing `--n-clients` debug-mode subsampling pick rows
+    by positional index via pandas `.sample(random_state=seed)`; a fixed
+    seed is only reproducible if the row order it's indexing into is also
+    fixed.
     """
     con = duckdb.connect()
     col_list = ", ".join(columns) if columns else "*"
-    return con.execute(f"SELECT {col_list} FROM read_parquet(?)", [parquet_path]).df()
+    return con.execute(
+        f"SELECT {col_list} FROM read_parquet(?) ORDER BY {CLIENT_ID_COL}", [parquet_path]
+    ).df()
 
 
 def cap_rows_per_client(df: pd.DataFrame, max_seq_len: int) -> pd.DataFrame:
@@ -73,6 +82,7 @@ def cap_rows_per_client(df: pd.DataFrame, max_seq_len: int) -> pd.DataFrame:
 
 def build_ptls_records(
     df: pd.DataFrame,
+    preprocessor: Optional[PandasDataPreprocessor] = None,
 ) -> Tuple[List[dict], PandasDataPreprocessor]:
     """Convert the flat per-row transaction table into ptls format:
     one dict per client with feature arrays (event_time + categorical/
@@ -83,6 +93,29 @@ def build_ptls_records(
     `preprocessor.get_category_dictionary_sizes()` to size embedding
     tables -- the raw distinct counts in schema.py are for documentation,
     the fitted sizes here are what the model must actually use.
+
+    Pass `preprocessor=None` (the default) to fit a fresh one on `df` --
+    do this for the TRAIN split only. For the VALID split, pass the
+    preprocessor that was fit on train here, so validation category
+    values get encoded against the train-only vocabulary instead of
+    leaking into it. Calling `preprocessor.transform(df)` directly would
+    NOT do this correctly: in pytorch-lifestream==0.7.0,
+    `DataPreprocessor.transform` is `def transform(self, x): return
+    self.fit_transform(x)` (ptls/preprocessing/base/data_preprocessor.py)
+    -- i.e. it silently refits every column transformer (the
+    FrequencyEncoder vocab, in particular) from scratch on whatever `df`
+    it's given, so a "transform" call on valid data would produce a
+    completely different vocabulary than train's, with the same integer
+    index meaning a different category between the two splits. Worked
+    around here by temporarily monkeypatching each already-fitted column
+    transformer's own `fit_transform` to just `transform` (skipping the
+    refit) for the duration of one `preprocessor.fit_transform(df)` call --
+    confirmed correct by reading `multithread_dispatcher.evaluate_single`,
+    which invokes `eval_func.fit_transform(data)` via attribute lookup at
+    call time, so the instance-level override is picked up. None of these
+    transformers (FrequencyEncoder, ColIdentityEncoder, ...) define their
+    own `fit_transform` -- they rely on sklearn's TransformerMixin default
+    -- so `del ct.fit_transform` afterward cleanly restores that.
 
     Note: `event_time_transformation="dt_to_timestamp"` is NOT used here.
     In pytorch-lifestream==0.7.0, `PandasDataPreprocessor`'s internal
@@ -96,27 +129,59 @@ def build_ptls_records(
     re-extract the Series correctly, so we precompute the numeric
     timestamp ourselves with the same `dt_to_timestamp` utility and hand it
     to the preprocessor as an already-correct passthrough column.
+
+    Category columns in the returned records are cast to `.long()` before
+    returning, unconditionally. Real reason, not defensive boilerplate:
+    `FrequencyEncoder.transform` does `pd_col.map(self.mapping).fillna(
+    self.other_values_code)` -- if `df` contains any category value
+    absent from the fitted vocabulary (only possible on the VALID path
+    above, never on a fresh fit), `.map()` produces NaN for those
+    entries, upcasting that whole column to float64; `.fillna()` fills
+    the NaN values but never restores the int dtype. That float64 column
+    otherwise survives all the way into whatever consumes these records
+    (ptls's own `TrxEncoder` for CoLES, our `TrxEmbedding`/
+    `EventPredictionHeads` for NEP/MLM) and crashes on a strict-dtype
+    call (`nn.Embedding`, `F.cross_entropy`) -- fixed once here at the
+    source rather than relying on every current and future consumer to
+    defend against it individually.
     """
     df = df.copy()
     df["event_time"] = dt_to_timestamp(df[EVENT_TIME_COL])
 
-    preprocessor = PandasDataPreprocessor(
-        col_id=CLIENT_ID_COL,
-        col_event_time="event_time",
-        event_time_transformation="none",
-        cols_category=CATEGORY_COLS,
-        category_transformation="frequency",
-        cols_numerical=NUMERIC_COLS,
-        return_records=True,
-    )
-    records = preprocessor.fit_transform(df)
+    if preprocessor is None:
+        preprocessor = PandasDataPreprocessor(
+            col_id=CLIENT_ID_COL,
+            col_event_time="event_time",
+            event_time_transformation="none",
+            cols_category=CATEGORY_COLS,
+            category_transformation="frequency",
+            cols_numerical=NUMERIC_COLS,
+            return_records=True,
+        )
+        records = preprocessor.fit_transform(df)
+    else:
+        fitted = preprocessor._all_col_transformers
+        for ct in fitted:
+            ct.fit_transform = ct.transform
+        try:
+            records = preprocessor.fit_transform(df)
+        finally:
+            for ct in fitted:
+                del ct.fit_transform
+
+    present_category_cols = set(CATEGORY_COLS) & set(records[0].keys()) if records else set()
+    for record in records:
+        for col in present_category_cols:
+            record[col] = record[col].long()
+
     return records, preprocessor
 
 
 def build_cotic_sequences(
     df: pd.DataFrame,
     event_type_col: str = "col_2",
-) -> Tuple[List[torch.Tensor], List[torch.Tensor], int]:
+    categories: Optional[np.ndarray] = None,
+) -> Tuple[List[torch.Tensor], List[torch.Tensor], int, np.ndarray, List]:
     """Convert the flat per-row transaction table into the (times, types)
     per-client sequences COTIC's `EventDataset` expects.
 
@@ -132,25 +197,57 @@ def build_cotic_sequences(
     `times` are days since each client's own first event in `df` (not a
     shared global origin) -- COTIC's normalizer expects a bounded,
     roughly-comparable time scale across clients, not raw epoch values.
+
+    Pass `categories=None` (the default) to factorize fresh on `df` -- do
+    this for the TRAIN split only, and pass the returned `categories`
+    array back in here for the VALID split, so event types get mapped
+    against train's category set instead of `pd.factorize` fitting a
+    second, disconnected vocabulary on valid alone (the same class of
+    leakage `build_ptls_records` has, and the same fix: fit once, reuse).
+    Any valid-only event value absent from `categories` gets dropped (with
+    a printed count) rather than silently producing an invalid code --
+    astronomically unlikely given ~50 categories across 90M+ rows, but
+    worth failing loud/visibly rather than corrupting an index.
+
+    Also returns `client_ids`, the id each returned sequence belongs to
+    (same groupby order as `times_list`/`types_list`) -- needed by callers
+    that must attribute a downstream embedding back to the client (or
+    synthetic per-window id, see splits.py) it came from.
     """
     df = df.sort_values([CLIENT_ID_COL, EVENT_TIME_COL])
-    codes, uniques = pd.factorize(df[event_type_col], sort=True)
+
+    if categories is None:
+        codes, categories = pd.factorize(df[event_type_col], sort=True)
+    else:
+        codes = pd.Categorical(df[event_type_col], categories=categories).codes
+        n_unseen = int((codes == -1).sum())
+        if n_unseen:
+            print(
+                f"  WARNING: dropping {n_unseen} events with {event_type_col} "
+                f"values unseen in train",
+                flush=True,
+            )
+            keep = codes != -1
+            df, codes = df[keep], codes[keep]
+
     df = df.assign(_event_type=codes)
 
-    times_list, types_list = [], []
-    for _, g in df.groupby(CLIENT_ID_COL, sort=False):
+    times_list, types_list, client_ids = [], [], []
+    for client_id, g in df.groupby(CLIENT_ID_COL, sort=False):
         t0 = g[EVENT_TIME_COL].iloc[0]
         days = (g[EVENT_TIME_COL] - t0).dt.days.astype(float).to_numpy()
         times_list.append(torch.tensor(days, dtype=torch.float32))
         types_list.append(torch.tensor(g["_event_type"].to_numpy(), dtype=torch.long))
+        client_ids.append(client_id)
 
-    return times_list, types_list, len(uniques)
+    return times_list, types_list, len(categories), categories, client_ids
 
 
 def build_thp_sequences(
     df: pd.DataFrame,
     event_type_col: str = "col_2",
-) -> Tuple[List[List[float]], List[List[float]], List[List[int]], int]:
+    categories: Optional[np.ndarray] = None,
+) -> Tuple[List[List[float]], List[List[float]], List[List[int]], int, np.ndarray, List]:
     """Convert the flat per-row transaction table into the plain-list
     (time_seqs, time_delta_seqs, type_seqs) format EasyTPP's `TPPDataset`/
     `EventTokenizer` expect -- unpadded Python lists per client, not
@@ -162,28 +259,48 @@ def build_thp_sequences(
     preceding gap); type ids are 0-indexed with no reserved pad slot here --
     EasyTPP's own pad_token_id (num_event_types, the next free index) is
     supplied separately when building the model/tokenizer configs.
+
+    Same train-fit/valid-reuse `categories` contract as
+    `build_cotic_sequences` -- see its docstring for why and how. Also
+    returns `client_ids` in the same order as the three sequence lists,
+    same rationale as `build_cotic_sequences`.
     """
     df = df.sort_values([CLIENT_ID_COL, EVENT_TIME_COL])
-    codes, uniques = pd.factorize(df[event_type_col], sort=True)
+
+    if categories is None:
+        codes, categories = pd.factorize(df[event_type_col], sort=True)
+    else:
+        codes = pd.Categorical(df[event_type_col], categories=categories).codes
+        n_unseen = int((codes == -1).sum())
+        if n_unseen:
+            print(
+                f"  WARNING: dropping {n_unseen} events with {event_type_col} "
+                f"values unseen in train",
+                flush=True,
+            )
+            keep = codes != -1
+            df, codes = df[keep], codes[keep]
+
     df = df.assign(_event_type=codes)
 
-    time_seqs, time_delta_seqs, type_seqs = [], [], []
-    for _, g in df.groupby(CLIENT_ID_COL, sort=False):
+    time_seqs, time_delta_seqs, type_seqs, client_ids = [], [], [], []
+    for client_id, g in df.groupby(CLIENT_ID_COL, sort=False):
         t0 = g[EVENT_TIME_COL].iloc[0]
         days = (g[EVENT_TIME_COL] - t0).dt.days.astype(float).to_numpy()
         deltas = [0.0] + list(days[1:] - days[:-1])
         time_seqs.append(days.tolist())
         time_delta_seqs.append(deltas)
         type_seqs.append(g["_event_type"].to_numpy().tolist())
+        client_ids.append(client_id)
 
-    return time_seqs, time_delta_seqs, type_seqs, len(uniques)
+    return time_seqs, time_delta_seqs, type_seqs, len(categories), categories, client_ids
 
 
 def build_chronos_series(
     df: pd.DataFrame,
     value_col: str = "col_11",
     freq: str = "D",
-) -> List[np.ndarray]:
+) -> Tuple[List[np.ndarray], List]:
     """Aggregate the flat per-row transaction table into one regularly
     spaced daily series per client -- Chronos-2 is a generic time-series
     FM, it expects a fixed-frequency grid, not raw irregular event
@@ -196,6 +313,11 @@ def build_chronos_series(
     "generic time-series FM adapted to the amount channel only" model
     from the design discussion: only one numeric column is used, none of
     the categorical features other models see.
+
+    Returns `(series_list, client_ids)` -- `client_ids[i]` is the client
+    `series_list[i]` belongs to (both follow the same groupby order), so
+    callers can pair embeddings back to clients without relying on an
+    implicit sort order.
     """
     daily = (
         df.groupby([CLIENT_ID_COL, EVENT_TIME_COL])[value_col]
@@ -205,10 +327,14 @@ def build_chronos_series(
     )
 
     series_list = []
-    for _, g in daily.groupby(CLIENT_ID_COL, sort=False):
+    client_ids = []
+    for client_id, g in daily.groupby(CLIENT_ID_COL, sort=False):
         g = g.set_index(EVENT_TIME_COL).sort_index()
         full_index = pd.date_range(g.index.min(), g.index.max(), freq=freq)
         series = g["value"].reindex(full_index, fill_value=0.0)
         series_list.append(series.to_numpy(dtype=np.float32))
+        client_ids.append(client_id)
+
+    return series_list, client_ids
 
     return series_list

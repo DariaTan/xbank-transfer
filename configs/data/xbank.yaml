@@ -19,8 +19,8 @@
 name: xbank
 
 paths:
-  transactions: /app/data/trans_any_pos_anonym_encoded.parquet
-  targets: /app/data/targets_anonym_encoded.parquet
+  transactions: /app/data/xbank_data/trans_any_pos_anonym_encoded.parquet
+  targets: /app/data/xbank_data/targets_anonym_encoded.parquet
 
 # Full observed range in the raw data (see src/report.html data overview).
 transactions_range: ["2022-01-01", "2024-01-31"]

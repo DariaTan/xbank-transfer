@@ -1,0 +1,47 @@
+# Direct dependencies, pinned to what was actually installed and verified
+# working (torch 2.5.1+cu124, both A5000s visible, all imports clean) on
+# 2026-08-25. Edit this file to add/change a package, then regenerate
+# requirements-lock.txt (see environments/README.md) -- Dockerfile installs
+# from the lock file, not this one, so the lock stays the source of truth
+# for what actually gets built.
+
+# --- core data / utils ---
+numpy==1.26.4
+pandas==3.0.5
+pyarrow==25.0.1
+duckdb==1.5.5
+scikit-learn==1.9.0
+lightgbm==4.7.0
+matplotlib==3.11.1
+tensorboard==2.21.0
+einops==0.8.2
+hydra-core==1.3.5
+omegaconf==2.3.1
+frozendict==2.4.6      # version pin: not shown by pip freeze (conda-provided build), pin is best-effort
+
+# --- event-sequence representation learning ---
+pytorch-lifestream==0.7.0   # CoLES
+distributed==2026.8.0       # dask.distributed: pytorch-lifestream's PandasDataPreprocessor
+                            # imports ptls.preprocessing.dask.dask_preprocessor unconditionally
+                            # (even though we only use the pandas backend), which needs this.
+                            # See environments/patches/README.md for a second, non-pip-installable
+                            # issue in the same import chain.
+easy_tpp==0.3.0             # THP / NHP / AttNHP / Intensity-Free TPP, unified harness
+pytorch-lightning==2.6.5
+torchmetrics==1.9.0
+
+# --- transformer / foundation models ---
+transformers==5.15.1
+accelerate==1.14.0
+datasets==5.0.1
+chronos-forecasting==2.3.1  # Chronos-2 (Amazon), Apache-2.0
+
+# NOTE: COTIC has no PyPI package -- its source is cloned into third_party/COTIC
+# (see environments/README.md) and imported from there, not pip-installed.
+rich==15.0.0   # COTIC's src/utils/__init__.py imports rich.syntax/rich.tree unconditionally
+       # (a Hydra-CLI pretty-printer we never call, but it's the package __init__,
+       # so it always runs on import). Not in COTIC's own pinned requirements.txt
+       # in our install path since we don't pip-install COTIC itself.
+# NOTE: the Sber "NEP" causal-transformer baseline has no released code/weights
+# -- it's a from-scratch model built on transformers/torch above, nothing
+# extra to install for it.
