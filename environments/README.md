@@ -19,16 +19,22 @@ The container runs `tail -f /dev/null` to stay alive rather than an interactive
 shell directly, so a training job survives an SSH disconnect -- `dexec.sh` is
 how you get a shell in it, any number of times.
 
-Mounts the repo root at `/app`, the raw transaction data
-(`/mnt/storage/d.tanyushkina/transactions`) read-only at `/app/data`, and
-`/mnt/storage/d.tanyushkina/hf_cache` (read-write) at
-`/root/.cache/huggingface` -- Chronos-2 downloads a real pretrained
-checkpoint from the HF Hub (public weights, Apache-2.0, not proprietary
-data) on first use; without this mount it silently re-downloads every
-time the container is recreated. `HF_HOME` is set to match. `PYTHONPATH`
-is set to `/app/src` so `data.*`/`models.*`/`training.*` are importable
-from anywhere in the container -- the smoke/train entry-point scripts
-live at `src/training/`, not a separate top-level `scripts/`.
+Mounts the repo root at `/app` and the transaction data
+(`/mnt/storage/d.tanyushkina/transactions`) read-write at `/app/data`
+(read-write, not read-only, since downstream embeds/checkpoints/logs are
+all written back under there -- be careful not to touch the raw parquet
+files directly), and `/mnt/storage/d.tanyushkina/hf_cache` (read-write) at
+`/hf_cache` -- Chronos-2 downloads a real pretrained checkpoint from the
+HF Hub (public weights, Apache-2.0, not proprietary data) on first use;
+without this mount it silently re-downloads every time the container is
+recreated. `HF_HOME` is set to match. Runs as the host user
+(`--user "$(id -u):$(id -g)"`, added 2026-09-14) rather than root, so
+every file it creates is already owned correctly on the host -- `HOME` is
+set to `/tmp` since the base image's baked-in `HOME=/root` isn't writable
+by a non-root uid. `PYTHONPATH` is set to `/app/src` so
+`data.*`/`models.*`/`training.*` are importable from anywhere in the
+container -- the smoke/train entry-point scripts live at `src/training/`,
+not a separate top-level `scripts/`.
 Publishes port 6006 for TensorBoard -- see TRAINING.md for the access
 command (it isn't reachable from outside the host on its own; forward it
 over SSH).

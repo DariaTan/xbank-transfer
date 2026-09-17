@@ -1,0 +1,28 @@
+# Bounded-client variant of configs/models/nep.yaml, for pretraining NEP
+# on MBD-daily (--data-config configs/data/mbd_daily.yaml) -- n_clients
+# capped at 50,000 (2026-09-14) rather than the full 1,484,490, since
+# train_nep.py's load_all_raw() loads the ENTIRE transactions table into
+# pandas in one shot (not a streaming/chunked loader), and the same
+# daily-aggregated MBD file (an earlier, smaller labeled-folds-only
+# version, 304M rows) already died silently -- no traceback, likely
+# OOM-killed -- at full scale. This caps the FIRST real training attempt
+# to a bounded, safer size while confirming the pipeline works end-to-end
+# against MBD before committing to a full-scale load.
+#
+# NOT the same file as configs/models/nep.yaml (which stays at
+# n_clients: null for xbank/full-scale MBD runs) -- keeping them separate
+# avoids the resume-guard mismatch that would come from later wanting a
+# full n_clients=null run under the SAME checkpoint_dir this run creates
+# (/app/data/checkpoints/mbd_daily_source/nep, derived from --data-config,
+# not from this file's own name).
+n_clients: 50000
+max_seq_len: 500
+max_epochs: 100
+patience: 5
+valid_frac: 0.05
+batch_size: 256
+d_model: 128
+num_layers: 1
+lr: 0.001
+seed: 0
+checkpoint_dir: /app/data/checkpoints/xbank_source/nep

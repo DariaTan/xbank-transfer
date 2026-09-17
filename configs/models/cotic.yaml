@@ -9,4 +9,10 @@ nb_filters: 128
 in_channels: 128
 nb_layers: 6
 seed: 0
-checkpoint_dir: /app/data/checkpoints/cotic
+# infer_cotic.py ONLY -- always the xbank-pretrained checkpoint, since it
+# runs frozen zero-shot inference against an xbank-pretrained model by
+# design. train_cotic.py no longer reads this key (updated 2026-09-14): it
+# derives its own checkpoint_dir from whichever --data-config is passed
+# (.../<data_config's name>_source/cotic), so pretraining on MBD never
+# collides with or depends on this value.
+checkpoint_dir: /app/data/checkpoints/xbank_source/cotic

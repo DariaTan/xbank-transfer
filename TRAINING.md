@@ -6,24 +6,51 @@ separate top-level `scripts/`) so they import sibling packages (`data.*`,
 `models.*`, `training.*`) directly, no sys.path hack -- the container sets
 `PYTHONPATH=/app/src` (see `drun.sh`).
 Chronos-2 has nothing to train (zero-shot only, see
-`src/training/infer_chronos2.py`). Each script takes no CLI flags except
-`--config` (default `configs/models/<model>.yaml`) -- every run parameter
-lives in that file, not on the command line:
+`src/training/infer_chronos2.py`). Each script takes two CLI flags:
+`--config` (default `configs/models/<model>.yaml` -- every architecture/
+run parameter lives in that file, not on the command line) and
+`--data-config` (default `configs/data/xbank.yaml`, kept as the flag's
+default for backward compatibility, but see the standing decision below),
+which selects the pretraining CORPUS -- pass `configs/data/mbd.yaml`
+(raw, MBD's transactions completely untouched -- NOT an "hourly"
+aggregation, nothing is binned to an hour) or `configs/data/mbd_daily.yaml`
+(daily-aggregated) instead to pretrain on MBD, holding the rest of the
+script identical (added 2026-09-14, for the raw/daily aggregation-level
+ablation, see RESEARCH_PLAN.md §4). **Standing decision (2026-09-14): no
+further pretraining happens on xbank data** -- MBD is now the only
+pretraining corpus actually used going forward; always pass an explicit
+`--data-config configs/data/mbd.yaml` or `mbd_daily.yaml`.
+`checkpoint_dir` is DERIVED from `--data-config`'s own `name:` field, not
+read from `--config` (fixed 2026-09-14 -- it used to be a hardcoded value
+in `configs/models/<model>.yaml`, which meant the same checkpoint_dir was
+used no matter which corpus was actually pretrained on): `xbank.yaml`
+(`name: xbank`) resolves to `/app/data/checkpoints/xbank_source/<model>`,
+`mbd.yaml` to `mbd_source/<model>`, `mbd_daily.yaml` to
+`mbd_daily_source/<model>` -- so two different `--data-config` runs of
+the same model can never collide on the same checkpoint_dir, and there's
+nothing to "pair" manually anymore. The `checkpoint_dir` key still present
+in each `configs/models/<model>.yaml` is read only by the `infer_*.py`
+scripts (always the xbank-pretrained checkpoint, by design -- see their
+own section below). A resume-time guard separately checks `data_config`
+against what a checkpoint was actually started with and refuses to resume
+across a mismatch.
 
-- Loads **all** clients from `trans_any_pos_anonym_encoded.parquet`, not a
-  sample (`smoke_*.py` sampled 500 to prove the pipeline works;
-  these load the real ~378K-client corpus). Set `n_clients` in the config
-  to cap it for a quick debug run.
+- Loads **all** clients from the configured corpus, not a sample
+  (`smoke_*.py` sampled 500 to prove the pipeline works; xbank's real
+  corpus is ~378K clients). Set `n_clients` in `--config` to cap it for a
+  quick debug run.
 - Trains with early stopping on a validation metric (`patience`, default
   5 epochs of no improvement) under a generous `max_epochs` cap (default
   100). There's no prior estimate of how many epochs full-scale
   convergence needs for any of these models, so early stopping decides
   rather than a guessed fixed count.
-- Checkpoints every epoch to `checkpoint_dir` (default
-  `/app/data/checkpoints/<model>/`; `last.*` for resuming, `best.*` for
-  the best validation epoch so far) -- re-running the exact same command
-  picks up where a killed job left off automatically, no extra flags
-  needed.
+- Checkpoints every epoch to `checkpoint_dir` (`last.*` for resuming,
+  `best.*` for the best validation epoch so far) -- re-running the exact
+  same command picks up where a killed job left off automatically, no
+  extra flags needed. xbank-pretrained checkpoints live under
+  `/app/data/checkpoints/xbank_source/<model>/`; MBD-pretrained ones
+  should go under the sibling `/app/data/checkpoints/mbd_source/<model>/`
+  (reorganized 2026-09-14 so the two are never mixed up at a glance).
 
 ## Picking a GPU
 
@@ -37,6 +64,13 @@ containers. Check current load before launching:
 Pin a job to one GPU via `CUDA_VISIBLE_DEVICES` on the `docker exec` call
 -- the container itself sees both GPUs (`--gpus all` in `drun.sh`), so this
 env var is what actually restricts a given process to one of them.
+
+## Launching in tmux
+
+One tmux session per model, so a closed SSH connection doesn't kill
+training and you can reattach any time to watch progress. `tee` writes the
+log to a file while still showing it live if you're attached at launch
+time:
 
 ```bash
 mkdir -p /app/data/logs
@@ -56,12 +90,31 @@ per GPU instead and queue the rest -- rerun the same tmux command for a
 queued model once a GPU frees up (a finished or early-stopped job releases
 its memory on process exit).
 
+**Watching progress:**
+
+```bash
+tail -f /app/data/logs/coles.log      # simplest, no attach needed
+tmux attach -t coles                # or attach directly; Ctrl-b d to detach without killing it
+```
+
+**Managing sessions:**
+
+```bash
+tmux ls                             # list running sessions
+tmux kill-session -t coles          # stop one (job keeps its last checkpoint, resumable later)
+```
+
 ## Watching curves in TensorBoard
 
-All five models log to `/app/data/lightning_logs/<model>` (CoLES/COTIC
-via `TensorBoardLogger`, THP/NEP/MLM via a plain `SummaryWriter` --
-`train/loss`+`valid/loss`, or `train/nll`+`valid/nll` for THP). Launch it
-inside the container, backgrounded:
+All five models log to `/app/data/lightning_logs/<data_cfg_name>_source/<model>`
+(CoLES/COTIC via `TensorBoardLogger`, THP/NEP/MLM via a plain
+`SummaryWriter` -- `train/loss`+`valid/loss`, or `train/nll`+`valid/nll`
+for THP) -- diverges by `--data-config`'s own `name` field, same
+`<name>_source` convention as `checkpoint_dir` (fixed 2026-09-17: it used
+to be a flat `/app/data/lightning_logs/<model>` regardless of
+`--data-config`, so an xbank run and an MBD run of the same model wrote
+into the SAME TensorBoard log dir and their curves interleaved
+indistinguishably). Launch it inside the container, backgrounded:
 
 ```bash
 docker exec -d xbank-transfer tensorboard --logdir /app/data/lightning_logs --host 0.0.0.0 --port 6006
@@ -78,6 +131,17 @@ ssh -L 6006:localhost:6006 d.tanyushkina@10.16.84.4
 Then browse to `http://localhost:6006`. Stop it with
 `docker exec xbank-transfer pkill -f tensorboard` when done -- it keeps
 running (and holding the port) until then.
+
+## If a full-population load runs out of host RAM
+
+`load_all_raw` pulls every row into pandas in one shot (~91.5M rows across
+all clients). The host had 106GB free as of 2026-08-26, which should be
+enough for any single model's load (COTIC/THP project down to 3 columns;
+CoLES/NEP/MLM need all 16) -- but if a job OOMs: rerun it with `n_clients`
+(in `configs/models/<model>.yaml`) set to some large-but-bounded number as
+a stopgap, and flag it. A real
+chunked/streaming loader would be the actual fix, not built yet since it
+wasn't needed at smoke-test scale.
 
 ## Inference
 

@@ -38,11 +38,35 @@ def sample_client_ids(parquet_path: str, n: int, seed: int = 0) -> List[str]:
     return df[CLIENT_ID_COL].tolist()
 
 
-def load_raw_for_clients(parquet_path: str, client_ids: List[str]) -> pd.DataFrame:
-    """Pull all rows for the given client ids into a pandas DataFrame."""
+def get_all_client_ids(parquet_path: str) -> List[str]:
+    """Every distinct client id in the table, without reading any raw rows
+    -- cheap even at ~1.5M distinct ids (2026-09-14), since only the id
+    column is ever scanned. Used by full-scale (`n_clients=None`) training
+    to drive chunked/streaming loading (see train_nep.py's chunked path)
+    instead of `load_all_raw`'s one-shot full materialization, which
+    OOM-killed against MBD's ~550-950M-row tables.
+    """
     con = duckdb.connect()
+    df = con.execute(
+        f"SELECT DISTINCT {CLIENT_ID_COL} FROM read_parquet(?)", [parquet_path]
+    ).df()
+    return df[CLIENT_ID_COL].tolist()
+
+
+def load_raw_for_clients(
+    parquet_path: str, client_ids: List[str], columns: Optional[List[str]] = None
+) -> pd.DataFrame:
+    """Pull all rows for the given client ids into a pandas DataFrame --
+    the WHERE filter runs inside DuckDB before anything becomes a pandas
+    object, so only the requested clients' rows are ever materialized
+    (unlike `load_all_raw` followed by a pandas-side `.sample()`, which
+    still pays for reading and materializing every row first). `columns`
+    mirrors `load_all_raw`'s same-named parameter.
+    """
+    con = duckdb.connect()
+    col_list = ", ".join(columns) if columns else "*"
     return con.execute(
-        f"SELECT * FROM read_parquet(?) WHERE {CLIENT_ID_COL} IN "
+        f"SELECT {col_list} FROM read_parquet(?) WHERE {CLIENT_ID_COL} IN "
         f"({', '.join('?' * len(client_ids))})",
         [parquet_path, *client_ids],
     ).df()
@@ -50,17 +74,25 @@ def load_raw_for_clients(parquet_path: str, client_ids: List[str]) -> pd.DataFra
 
 def load_all_raw(parquet_path: str, columns: Optional[List[str]] = None) -> pd.DataFrame:
     """Load the full transactions table -- every client, not a sample --
-    for full-scale training runs. `columns` projects to a subset (e.g. just
-    id/event_time/event_type for COTIC/THP, which only use one mark column)
-    to cut memory for models that don't need the other columns; omit for
-    all columns.
+    for full-scale training runs (`n_clients: null`). `columns` projects to
+    a subset (e.g. just id/event_time/event_type for COTIC/THP, which only
+    use one mark column) to cut memory for models that don't need the
+    other columns; omit for all columns.
+
+    When `n_clients` IS set (a bounded/debug run), callers should use
+    `sample_client_ids` + `load_raw_for_clients` instead of this function
+    -- filtering to the sampled clients inside DuckDB, before anything
+    becomes a pandas object, rather than calling this function (which
+    always reads and materializes every row regardless of any cap applied
+    afterward) and then subsampling the resulting DataFrame. The latter
+    pattern was the actual cause of two silent OOM-kills against MBD's
+    ~550-950M-row tables (2026-09-14): `n_clients` was set, but the full
+    table got loaded into pandas anyway before the cap was ever applied.
 
     `ORDER BY` on the client id pins row order across runs -- without it,
-    DuckDB's parallel scan gives no ordering guarantee, which matters
-    because callers doing `--n-clients` debug-mode subsampling pick rows
-    by positional index via pandas `.sample(random_state=seed)`; a fixed
-    seed is only reproducible if the row order it's indexing into is also
-    fixed.
+    DuckDB's parallel scan gives no ordering guarantee, which other
+    downstream code (e.g. `cap_rows_per_client`'s groupby) relies on being
+    stable given a fixed seed.
     """
     con = duckdb.connect()
     col_list = ", ".join(columns) if columns else "*"

@@ -1,13 +1,43 @@
-﻿# MBD (Multimodal Banking Dataset, Sber AI Lab, ACM CIKM 2025 -- arXiv:2409.17587).
-# Role in this project: cross-institution TRANSFER TARGET only (see client
-# segment note below on why this isn't also "cross-segment"). No
-# pretraining happens on this data -- the FM is pretrained on
-# configs/data/xbank.yaml, then run in frozen inference over MBD to produce
-# embeddings, which are evaluated zero/few-shot against MBD's own targets.
-# This is the reverse of xbank's role (pretrain + own local eval).
+﻿# MBD (Multimodal Banking Dataset, Sber AI Lab -- arXiv:2409.17587, "more
+# than 2M corporate clients of a large bank", confirmed 2026-09-14 -- NOT
+# retail individuals, see client segment note below).
+#
+# THE primary pretraining corpus in this project (standing decision as of
+# 2026-09-14: no further pretraining happens on xbank data -- see
+# RESEARCH_PLAN.md §1). Two roles:
+# 1. PRETRAINING SOURCE: every train_{model}.py script takes this file
+#    directly as --data-config, pretraining on MBD's transactions exactly
+#    as they ship -- RAW, untouched, one row per transaction (see "raw
+#    vs. hourly" note below). See configs/data/mbd_daily.yaml for the
+#    daily-aggregated sibling config used for the aggregation-level
+#    ablation, holding institution fixed (RESEARCH_PLAN.md §4).
+# 2. Its OWN in-domain eval target: the labeled folds' targets (below)
+#    are what train_downstream_mbd.py rotates through to score an
+#    MBD-pretrained checkpoint against MBD's own labels -- this is the
+#    "no-shift" baseline referenced in RESEARCH_PLAN.md §4.
+# It is NOT a cross-institution transfer target for an xbank-pretrained
+# checkpoint any more -- that was the original (now reversed) direction.
 name: mbd
-role: transfer_eval  # not: pretrain
+role: pretrain_and_in_domain_eval
 
+# "raw", not "hourly": freq=None in data/mbd_adapter.py does NOT aggregate
+# to an hour bucket -- it keeps every individual transaction row exactly
+# as MBD ships it, at whatever native hour-of-day timestamp precision it
+# already has. "Raw" is the un-aggregated baseline; "daily" (mbd_daily.yaml)
+# is the one that actually aggregates (corrected 2026-09-14 -- this file
+# and its outputs were previously mislabeled "hourly" throughout).
+#
+# Includes MBD's unlabeled fold=-1 pool (added 2026-09-14, per project
+# decision): pretraining is self-supervised and needs no labels, and
+# fold=-1 (562M rows) is exactly what MBD's own benchmark reserves for
+# this. data/mbd_adapter.py's ALL_FOLDS (labeled 0-4 + unlabeled -1) is
+# now the default for the transactions file; only the targets file stays
+# restricted to the labeled folds (fold=-1 has no targets partition).
+
+# Facts below originally came from a web search of the paper/README on
+# 2026-08-26; confirmed directly against the real downloaded data on
+# 2026-09-08 (client_split/detail/targets fold structure, row counts,
+# target base rates) -- see RESEARCH_PLAN.md §4.
 source:
   paper: "https://arxiv.org/abs/2409.17587"
   repo: "https://github.com/dzhambo/mbd"
@@ -17,10 +47,33 @@ source:
 # into xbank's own id/col_1/col_2..col_16 column convention), read by
 # src/training/infer_mbd.py and train_downstream_mbd.py instead of
 # hardcoding -- same "read paths from the data config" convention as
-# configs/data/xbank.yaml's paths.transactions/targets.
+# configs/data/xbank.yaml's paths.transactions/targets. mbd_data/raw_adapted/
+# == raw/untouched (this file), mbd_data/daily_adapted/ == daily
+# (mbd_daily.yaml) -- one self-contained transactions+targets pair per
+# frequency. NOT the same as mbd_data/raw/, which is the untouched MBD
+# SOURCE tree (moved there 2026-09-14, data/mbd_adapter.py's MBD_ROOT) --
+# the adapter reads from mbd_data/raw/ and writes to mbd_data/raw_adapted/,
+# two different folders.
+#
+# Built 2026-09-14 via `python -m data.mbd_adapter --freq raw`, ALL_FOLDS
+# (labeled + unlabeled): 947,899,612 rows (one per raw transaction, no
+# aggregation), 1,484,490 distinct clients -- matches the raw source
+# exactly. See mbd_daily.yaml for the daily-aggregated sibling's own
+# verification (that one needed two fixes after OOM-killing twice at this
+# scale -- see its own note).
 paths:
-  transactions: /app/data/mbd_data/transactions_adapted.parquet
-  targets: /app/data/mbd_data/targets_adapted.parquet
+  transactions: /app/data/mbd_data/raw_adapted/transactions.parquet
+  targets: /app/data/mbd_data/raw_adapted/targets.parquet
+
+# The single category column COTIC/THP use as their "event type" mark --
+# read from THIS config by train_cotic.py/train_thp.py (moved here from a
+# hardcoded literal in both scripts, 2026-09-14), same rationale as
+# configs/data/xbank.yaml's own event_type_col note. event_type is the
+# closest MBD analogue to xbank's MCC-like col_2 (see TRX_CATEGORY_MAP in
+# data/mbd_adapter.py, which is exactly what lands in col_2 after
+# adaptation) -- both datasets happen to use col_2 for the same reason,
+# not by coincidence.
+event_type_col: col_2
 
 scale:
   clients_total: 1_500_000        # includes unlabeled clients across all modalities
@@ -30,7 +83,7 @@ scale:
     was an earlier, incorrect assumption, corrected 2026-09-08). Any real
     segment difference (e.g. SME vs. larger corporate, industry mix) is
     unverified -- see RESEARCH_PLAN.md's client segment note."
-  transactions: 950_000_000
+  transactions: 950_000_000       # ALL folds (labeled 0-4 + unlabeled -1) -- matches the raw pretraining corpus size now that fold=-1 is included
   avg_transactions_per_client: 638
 
 # Transactions modality only (MBD also has geo, support-dialogue embeddings,
@@ -50,3 +103,6 @@ transactions_schema:
 
 targets:
   n_targets: 4
+  kind: binary product-purchase flags, monthly
+  period: "12 months of 2022"
+  split: "5-fold out-of-fold: 4 folds train, 1 fold test, both public"

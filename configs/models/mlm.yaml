@@ -9,4 +9,10 @@ d_model: 128
 num_layers: 1
 lr: 0.001
 seed: 0
-checkpoint_dir: /app/data/checkpoints/mlm
+# infer_mlm.py / infer_mbd.py ONLY -- always the xbank-pretrained
+# checkpoint, since both scripts run frozen zero-shot inference against
+# an xbank-pretrained model by design. train_mlm.py no longer reads this
+# key (updated 2026-09-14): it derives its own checkpoint_dir from
+# whichever --data-config is passed (.../<data_config's name>_source/mlm),
+# so pretraining on MBD never collides with or depends on this value.
+checkpoint_dir: /app/data/checkpoints/xbank_source/mlm

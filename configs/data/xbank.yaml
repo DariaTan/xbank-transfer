@@ -22,6 +22,18 @@ paths:
   transactions: /app/data/xbank_data/trans_any_pos_anonym_encoded.parquet
   targets: /app/data/xbank_data/targets_anonym_encoded.parquet
 
+# The single category column COTIC/THP use as their "event type" mark --
+# both TPP architectures model one categorical mark per event, not the
+# full feature set (see data/loaders.py's build_cotic_sequences/
+# build_thp_sequences). col_2 is xbank's MCC-like category, the most
+# semantically meaningful single field. Read from THIS config by
+# train_cotic.py/train_thp.py (moved here from a hardcoded literal in
+# both scripts, 2026-09-14) since it's a property of the DATA, not the
+# architecture -- a different --data-config could reasonably need a
+# different column here, even though today xbank and MBD both happen to
+# use col_2 for the same reason (see configs/data/mbd.yaml's own note).
+event_type_col: col_2
+
 # Full observed range in the raw data (see src/report.html data overview).
 transactions_range: ["2022-01-01", "2024-01-31"]
 targets_range: ["2023-01-01", "2024-02-29"]

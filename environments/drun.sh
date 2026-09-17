@@ -8,12 +8,29 @@
 #   /mnt/storage/d.tanyushkina/transactions -> /app/data               (read-write, so downstream embeds can be
 #                                                                        written under /app/data/embeds; be careful
 #                                                                        not to touch the raw parquet files here)
-#   /mnt/storage/d.tanyushkina/hf_cache     -> /root/.cache/huggingface (read-write, survives container recreation)
+#   /mnt/storage/d.tanyushkina/hf_cache     -> /hf_cache               (read-write, survives container recreation)
 #
 # The HF cache mount matters for Chronos-2: it's a real pretrained
 # checkpoint pulled from the Hub (Apache-2.0, public weights, not
 # proprietary data), and without this mount it silently re-downloads
-# every time the container is recreated.
+# every time the container is recreated. Mounted at /hf_cache rather
+# than the default /root/.cache/huggingface because the container now
+# runs as the host user (--user below), and /root is mode 700 -- not
+# even traversable by a non-root uid, which would silently break HF_HOME.
+#
+# --user "$(id -u):$(id -g)" runs the container as the host user instead
+# of root (added 2026-09-14, after repeatedly finding root-owned files
+# under /app/data from earlier root-run containers, which then blocked
+# writes once ownership was fixed manually) -- every new file the
+# container creates under /app/data or /hf_cache now lands owned by the
+# host user from the start, no manual chown needed going forward.
+# HOME=/tmp for the same reason: the base image bakes in HOME=/root, and
+# that env var isn't reset just because --user changes the running uid --
+# left as /root, any library that writes cache/config to $HOME (matplotlib
+# font cache, ~/.local, ~/.triton, ...) would hit permission-denied since
+# /root is mode 700. /tmp is container-local (doesn't survive a recreate,
+# unlike the two bind mounts above) but that only costs re-warming a few
+# harmless caches, never real data.
 #
 # PYTHONPATH=/app/src makes `data.*`/`models.*`/`training.*` importable
 # from anywhere in the container (no per-script sys.path hack needed) --
@@ -49,12 +66,14 @@ mkdir -p "${HF_CACHE_DIR}"
 
 docker run -d \
     --name "${CONTAINER_NAME}" \
+    --user "$(id -u):$(id -g)" \
     --gpus "${GPUS}" \
     --shm-size=16g \
     -v "${REPO_DIR}:/app" \
     -v "${DATA_DIR}:/app/data" \
-    -v "${HF_CACHE_DIR}:/root/.cache/huggingface" \
-    -e HF_HOME=/root/.cache/huggingface \
+    -v "${HF_CACHE_DIR}:/hf_cache" \
+    -e HF_HOME=/hf_cache \
+    -e HOME=/tmp \
     -e PYTHONPATH=/app/src \
     -p 6006:6006 \
     -w /app \

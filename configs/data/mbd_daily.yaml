@@ -1,0 +1,51 @@
+# Daily-aggregated sibling of configs/data/mbd.yaml -- same MBD source,
+# same clients/folds, but transactions are aggregated to xbank's own
+# (client, day, category) row convention (data/mbd_adapter.py's
+# build_mbd_transactions(freq="D")) instead of kept RAW (mbd.yaml's
+# freq=None, MBD's transactions completely untouched -- NOT "hourly",
+# see mbd.yaml's note, corrected 2026-09-14). See mbd.yaml for everything
+# else (client domain, source paper, target schema, pretraining-source
+# role) -- duplicated here only where it actually differs.
+#
+# Purpose: an aggregation-level-only ablation. Pretraining CoLES (say) on
+# this file vs. on mbd.yaml holds institution and client population fixed
+# and changes only the row granularity -- isolating "does aggregation
+# level matter" from "does institution matter" (RESEARCH_PLAN.md §4).
+# Weekly was considered and dropped -- only raw (mbd.yaml) and daily
+# (this file) are built.
+name: mbd_daily
+role: pretrain_and_in_domain_eval
+
+source:
+  paper: "https://arxiv.org/abs/2409.17587"
+  repo: "https://github.com/dzhambo/mbd"
+  format: parquet
+
+# mbd_data/daily_adapted/ (renamed 2026-09-14 from mbd_data/daily/, to
+# match mbd.yaml's mbd_data/raw_adapted/ -- both "_adapted" folders hold
+# this adapter's OUTPUT, distinct from mbd_data/raw/, the untouched MBD
+# SOURCE tree).
+paths:
+  transactions: /app/data/mbd_data/daily_adapted/transactions.parquet
+  targets: /app/data/mbd_data/daily_adapted/targets.parquet
+
+# See mbd.yaml's own note -- same field, same value, for the same reason.
+event_type_col: col_2
+
+# Rebuilt 2026-09-14 with ALL_FOLDS (labeled + unlabeled) via
+# `python -m data.mbd_adapter --freq daily`, after the first two attempts
+# were silently OOM-killed processing all ~950M rows as one combined
+# GROUP BY -- fixed by splitting the aggregation into two passes (labeled
+# folds, then fold=-1, verified mathematically equivalent to one combined
+# GROUP BY on a sample first) plus capping DuckDB's memory_limit so it
+# spills to disk instead of racing the kernel (see data/mbd_adapter.py's
+# _connect()). Verified post-build: 0 duplicate (id, col_1, col_2..col_14)
+# groups, col_11 in [0, 1], and distinct client count matches the raw
+# source exactly (1,484,490 == 1,484,490).
+scale:
+  clients_total: 1_500_000
+  clients_labeled: 1_000_000
+  clients_note: "corporate/legal-entity clients (INN-identified), same as mbd.yaml"
+  transactions_raw: 947_899_612    # before daily aggregation, ALL folds (verified count)
+  transactions_daily_agg: 557_660_428  # verified row count of paths.transactions above (41.2% reduction)
+  clients_verified: 1_484_490      # verified distinct count, matches raw source exactly

@@ -23,5 +23,7 @@ RUN pip install --no-cache-dir -r /tmp/requirements-lock.txt
 # environments/patches/README.md for what's actually wrong upstream.
 COPY environments/patches/ptls_preprocessing_init.py \
     /opt/conda/lib/python3.11/site-packages/ptls/preprocessing/__init__.py
+COPY environments/patches/ptls_multithread_dispatcher.py \
+    /opt/conda/lib/python3.11/site-packages/ptls/preprocessing/multithread_dispatcher.py
 
 CMD ["/bin/bash"]
