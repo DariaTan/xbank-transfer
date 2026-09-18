@@ -74,10 +74,10 @@ MBD_TARGETS_GLOB = f"{MBD_ROOT}/targets/fold=*/*.parquet"
 DUCKDB_TEMP_DIR = "/app/data/duckdb_tmp"
 
 
-def _connect() -> duckdb.DuckDBPyConnection:
+def _connect(temp_dir: str = DUCKDB_TEMP_DIR) -> duckdb.DuckDBPyConnection:
     con = duckdb.connect()
-    Path(DUCKDB_TEMP_DIR).mkdir(parents=True, exist_ok=True)
-    con.execute(f"SET temp_directory = '{DUCKDB_TEMP_DIR}'")
+    Path(temp_dir).mkdir(parents=True, exist_ok=True)
+    con.execute(f"SET temp_directory = '{temp_dir}'")
     # DuckDB's own default memory_limit (~80% of system RAM) leaves no
     # safety margin: it only starts spilling to temp_directory once
     # already close to that limit, by which point the OS's OOM killer can
@@ -137,12 +137,12 @@ TARGET_COLUMN_MAP = {
 }
 
 
-def _amount_bounds(con: duckdb.DuckDBPyConnection, folds: Iterable[int]) -> tuple:
+def _amount_bounds(con: duckdb.DuckDBPyConnection, folds: Iterable[int], trx_glob: str = MBD_TRX_GLOB) -> tuple:
     fold_list = ", ".join(str(f) for f in folds)
     lo, hi = con.execute(
         f"""
         SELECT MIN(amount), MAX(amount)
-        FROM read_parquet('{MBD_TRX_GLOB}', hive_partitioning=true)
+        FROM read_parquet('{trx_glob}', hive_partitioning=true)
         WHERE fold IN ({fold_list})
         """
     ).fetchone()
@@ -154,6 +154,8 @@ def build_mbd_transactions(
     folds: Iterable[int] = ALL_FOLDS,
     freq: Optional[str] = None,
     con: Optional[duckdb.DuckDBPyConnection] = None,
+    trx_glob: str = MBD_TRX_GLOB,
+    temp_dir: str = DUCKDB_TEMP_DIR,
 ) -> None:
     """Materializes MBD transactions into a parquet file shaped like
     xbank's own transactions table (id, col_1, col_2..col_16), so it
@@ -190,7 +192,7 @@ def build_mbd_transactions(
     if freq not in (None, "D"):
         raise ValueError(f"freq must be None or 'D', got {freq!r}")
 
-    con = con or _connect()
+    con = con or _connect(temp_dir)
     fold_list = ", ".join(str(f) for f in folds)
     placeholder_select = ",\n                ".join(f"0 AS {col}" for col in PLACEHOLDER_FEATURE_COLS)
 
@@ -199,7 +201,7 @@ def build_mbd_transactions(
             f"CAST({src} AS BIGINT) AS {dst}" if src in TRX_DOUBLE_CATEGORY_COLS else f"{src} AS {dst}"
             for src, dst in TRX_CATEGORY_MAP.items()
         )
-        lo, hi = _amount_bounds(con, folds)
+        lo, hi = _amount_bounds(con, folds, trx_glob)
         span = hi - lo if hi > lo else 1.0
 
         query = f"""
@@ -210,7 +212,7 @@ def build_mbd_transactions(
                     (amount - {lo}) / {span} AS col_11,
                     {category_select},
                     {placeholder_select}
-                FROM read_parquet('{MBD_TRX_GLOB}', hive_partitioning=true)
+                FROM read_parquet('{trx_glob}', hive_partitioning=true)
                 WHERE fold IN ({fold_list})
             ) TO '{output_path}' (FORMAT PARQUET)
         """
@@ -244,7 +246,7 @@ def build_mbd_transactions(
     )
 
     fold_groups = [g for g in ([f for f in folds if f != -1], [f for f in folds if f == -1]) if g]
-    tmp_dir = Path(DUCKDB_TEMP_DIR)
+    tmp_dir = Path(temp_dir)
     tmp_dir.mkdir(parents=True, exist_ok=True)
     intermediate_paths = []
     try:
@@ -258,7 +260,7 @@ def build_mbd_transactions(
                         DATE_TRUNC('day', event_time) AS {EVENT_TIME_COL},
                         {daily_category_select},
                         SUM(amount) AS amount_sum
-                    FROM read_parquet('{MBD_TRX_GLOB}', hive_partitioning=true)
+                    FROM read_parquet('{trx_glob}', hive_partitioning=true)
                     WHERE fold IN ({group_fold_list})
                     GROUP BY client_id, DATE_TRUNC('day', event_time), {", ".join(group_cols)}
                 ) TO '{intermediate_path}' (FORMAT PARQUET)
@@ -292,6 +294,7 @@ def build_mbd_targets(
     output_path: str,
     folds: Iterable[int] = LABELED_FOLDS,
     con: Optional[duckdb.DuckDBPyConnection] = None,
+    targets_glob: str = MBD_TARGETS_GLOB,
 ) -> None:
     """Materializes MBD's per-fold targets into xbank's targets shape
     (id, col_1, col_2..col_5), so it's a drop-in TARGETS_PATH for anything
@@ -321,7 +324,7 @@ def build_mbd_targets(
                 DATE_TRUNC('month', CAST(mon AS DATE)) AS {TARGETS_DATE_COL},
                 {target_select},
                 fold
-            FROM read_parquet('{MBD_TARGETS_GLOB}', hive_partitioning=true)
+            FROM read_parquet('{targets_glob}', hive_partitioning=true)
             WHERE fold IN ({fold_list})
         ) TO '{output_path}' (FORMAT PARQUET)
     """
@@ -337,6 +340,10 @@ if __name__ == "__main__":
     parser.add_argument("--transactions-out", default=None, help="default /app/data/mbd_data/{raw_adapted,daily_adapted}/transactions.parquet depending on --freq")
     parser.add_argument("--targets-out", default=None, help="default /app/data/mbd_data/{raw_adapted,daily_adapted}/targets.parquet depending on --freq -- same content either way (targets don't depend on transaction aggregation), duplicated per-frequency so each configs/data/mbd*.yaml's paths.transactions/paths.targets pair is self-contained under one folder")
     parser.add_argument("--folds", type=int, nargs="+", default=list(ALL_FOLDS), help="folds for the TRANSACTIONS file only (default: ALL_FOLDS, labeled 0-4 + unlabeled -1 -- pretraining needs no labels). Targets always use only the labeled folds (0-4), independent of this flag, since fold=-1 has no targets partition.")
+    parser.add_argument("--mbd-root", default=MBD_ROOT,
+                        help="root of the MBD source tree (expects detail/trx/fold=*/ and targets/fold=*/ inside); default is the in-container path -- pass the host path when running outside the container")
+    parser.add_argument("--temp-dir", default=DUCKDB_TEMP_DIR,
+                        help="duckdb spill dir for the daily aggregation's intermediates (needs free disk roughly 2x the output size); default is the in-container path")
     args = parser.parse_args()
 
     freq = None if args.freq == "raw" else "D"
@@ -351,10 +358,18 @@ if __name__ == "__main__":
     transactions_out = args.transactions_out or f"/app/data/mbd_data/{freq_dir}/transactions.parquet"
     targets_out = args.targets_out or f"/app/data/mbd_data/{freq_dir}/targets.parquet"
 
+    trx_glob = f"{args.mbd_root}/detail/trx/fold=*/*.parquet"
+    targets_glob = f"{args.mbd_root}/targets/fold=*/*.parquet"
+    # one shared connection with the CALLER's temp dir -- build_mbd_targets's
+    # own _connect() default still points at the in-container path and would
+    # crash on a host run
+    con = _connect(args.temp_dir)
+
     print(f"Building adapted MBD transactions (folds={args.folds}, freq={args.freq}) ...", flush=True)
-    build_mbd_transactions(transactions_out, folds=args.folds, freq=freq)
+    build_mbd_transactions(transactions_out, folds=args.folds, freq=freq, con=con,
+                           trx_glob=trx_glob, temp_dir=args.temp_dir)
     print(f"  wrote {transactions_out}", flush=True)
 
     print(f"Building adapted MBD targets (folds={list(LABELED_FOLDS)}) ...", flush=True)
-    build_mbd_targets(targets_out, folds=LABELED_FOLDS)
+    build_mbd_targets(targets_out, folds=LABELED_FOLDS, con=con, targets_glob=targets_glob)
     print(f"  wrote {targets_out}", flush=True)

@@ -6,3 +6,6 @@ wandb/
 __pycache__/
 *.pyc
 .venv/
+/article/
+/dialog.md
+*.pdf
