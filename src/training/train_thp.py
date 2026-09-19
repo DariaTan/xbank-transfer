@@ -11,11 +11,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 import torch
 import yaml
 from torch.utils.tensorboard import SummaryWriter
 
-from data.loaders import build_thp_sequences, cap_rows_per_client, load_all_raw, load_raw_for_clients, sample_client_ids
+from data.loaders import build_thp_sequences, cap_rows_per_client, get_all_client_ids, load_raw_for_clients, sample_client_ids
 from models.thp import (
     build_dataloader,
     build_model,
@@ -67,10 +68,6 @@ def main():
     TRANSACTIONS_PATH = data_cfg["paths"]["transactions"]
 
     ckpt_dir = Path(f"/app/data/checkpoints/{data_cfg['name']}_source") / MODEL_NAME
-    # data_config guarded here too -- resuming a checkpoint against a
-    # DIFFERENT dataset than it was started with (e.g. an xbank checkpoint
-    # accidentally resumed with --data-config mbd.yaml) would otherwise
-    # silently mix two different data sources into one run.
     check_or_save_run_config(ckpt_dir, args, ["seed", "valid_frac", "n_clients", "max_seq_len", "data_config"])
 
     # Which single category column to use as THP's "event type" mark is a
@@ -92,28 +89,86 @@ def main():
         client_ids = sample_client_ids(TRANSACTIONS_PATH, args.n_clients, seed=args.seed)
         df = load_raw_for_clients(TRANSACTIONS_PATH, client_ids, columns=columns)
         print(f"  {len(df)} rows, {df['id'].nunique()} clients", flush=True)
+        df = cap_rows_per_client(df, args.max_seq_len)
+        print(f"  {len(df)} rows after capping to {args.max_seq_len}/client", flush=True)
+
+        train_df, valid_df = split_df_by_client(df, "id", args.valid_frac, args.seed)
+        print(
+            f"  split into train={train_df['id'].nunique()} clients, "
+            f"valid={valid_df['id'].nunique()} clients (before building sequences)",
+            flush=True,
+        )
+
+        print("Building THP (time, time_delta, type) sequences ...", flush=True)
+        train_time, train_delta, train_type, num_types, categories, _ = build_thp_sequences(train_df, event_type_col=EVENT_TYPE_COL)
+        valid_time, valid_delta, valid_type, _, _, _ = build_thp_sequences(valid_df, event_type_col=EVENT_TYPE_COL, categories=categories)
+        print(
+            f"  train={len(train_time)} valid={len(valid_time)}, num_types={num_types}",
+            flush=True,
+        )
     else:
-        print(f"Loading full transactions table (id, col_1, {EVENT_TYPE_COL}) from {cli.data_config} ...", flush=True)
-        df = load_all_raw(TRANSACTIONS_PATH, columns=columns)
-        print(f"  {len(df)} rows, {df['id'].nunique()} clients", flush=True)
+        # Full-scale (no cap): stream through ALL clients in bounded
+        # chunks rather than load_all_raw's one-shot full materialization
+        # -- same OOM train_nep.py hit against MBD's ~550M-row daily table
+        # (2026-09-14). Same design as train_coles.py/train_cotic.py's
+        # identical chunked branch, adapted to THP's own build_thp_sequences
+        # (pd.factorize-based `categories`, not a ptls PandasDataPreprocessor):
+        # a client's rows never split across chunks, train/valid membership
+        # is decided ONCE upfront on the cheap id list, and `categories` is
+        # fit on the FIRST chunk containing train clients (chunks are
+        # pre-shuffled, so this is a random ~100K-client sample) and reused
+        # (any event value absent from it gets dropped, same as the
+        # existing valid-split behavior) for every subsequent chunk.
+        CHUNK_SIZE = getattr(args, "chunk_size", 100_000)
+        print(f"Loading transactions table (id, col_1, {EVENT_TYPE_COL}) from {cli.data_config} in chunks (streaming, chunk_size={CHUNK_SIZE} clients) ...", flush=True)
+        all_ids = get_all_client_ids(TRANSACTIONS_PATH)
+        print(f"  {len(all_ids)} distinct clients total", flush=True)
 
-    df = cap_rows_per_client(df, args.max_seq_len)
-    print(f"  {len(df)} rows after capping to {args.max_seq_len}/client", flush=True)
+        id_df = pd.DataFrame({"id": all_ids})
+        train_id_df, valid_id_df = split_df_by_client(id_df, "id", args.valid_frac, args.seed)
+        train_ids, valid_ids = set(train_id_df["id"]), set(valid_id_df["id"])
+        print(f"  split into train={len(train_ids)} clients, valid={len(valid_ids)} clients", flush=True)
 
-    train_df, valid_df = split_df_by_client(df, "id", args.valid_frac, args.seed)
-    print(
-        f"  split into train={train_df['id'].nunique()} clients, "
-        f"valid={valid_df['id'].nunique()} clients (before building sequences)",
-        flush=True,
-    )
+        shuffled_ids = np.random.RandomState(args.seed).permutation(all_ids).tolist()
+        n_chunks = (len(shuffled_ids) + CHUNK_SIZE - 1) // CHUNK_SIZE
 
-    print("Building THP (time, time_delta, type) sequences ...", flush=True)
-    train_time, train_delta, train_type, num_types, categories, _ = build_thp_sequences(train_df, event_type_col=EVENT_TYPE_COL)
-    valid_time, valid_delta, valid_type, _, _, _ = build_thp_sequences(valid_df, event_type_col=EVENT_TYPE_COL, categories=categories)
-    print(
-        f"  train={len(train_time)} valid={len(valid_time)}, num_types={num_types}",
-        flush=True,
-    )
+        train_time, train_delta, train_type = [], [], []
+        valid_time, valid_delta, valid_type = [], [], []
+        categories, num_types = None, None
+        for chunk_i in range(n_chunks):
+            batch_ids = shuffled_ids[chunk_i * CHUNK_SIZE : (chunk_i + 1) * CHUNK_SIZE]
+            chunk_df = load_raw_for_clients(TRANSACTIONS_PATH, batch_ids, columns=columns)
+            chunk_df = cap_rows_per_client(chunk_df, args.max_seq_len)
+
+            chunk_train_df = chunk_df[chunk_df["id"].isin(train_ids)]
+            chunk_valid_df = chunk_df[chunk_df["id"].isin(valid_ids)]
+            del chunk_df
+
+            if len(chunk_train_df):
+                t_time, t_delta, t_type, num_types, categories, _ = build_thp_sequences(
+                    chunk_train_df, event_type_col=EVENT_TYPE_COL, categories=categories
+                )
+                train_time.extend(t_time)
+                train_delta.extend(t_delta)
+                train_type.extend(t_type)
+            if len(chunk_valid_df) and categories is not None:
+                v_time, v_delta, v_type, _, _, _ = build_thp_sequences(
+                    chunk_valid_df, event_type_col=EVENT_TYPE_COL, categories=categories
+                )
+                valid_time.extend(v_time)
+                valid_delta.extend(v_delta)
+                valid_type.extend(v_type)
+            del chunk_train_df, chunk_valid_df
+
+            print(
+                f"  chunk {chunk_i + 1}/{n_chunks}: train_seqs={len(train_time)} valid_seqs={len(valid_time)}",
+                flush=True,
+            )
+
+        print(
+            f"  done: train={len(train_time)} valid={len(valid_time)}, num_types={num_types}",
+            flush=True,
+        )
 
     # Persisted so downstream inference maps event types (col_2) to the
     # SAME ids this checkpoint's layer_type_emb/intensity heads were
@@ -139,10 +194,6 @@ def main():
         start_epoch = load_checkpoint(str(last_path), model, optimizer, stopper, device)
         print(f"Resuming from checkpoint at epoch {start_epoch} (best={stopper.best:.4f} @ {stopper.best_epoch})", flush=True)
 
-    # Diverges by data_cfg['name'] same as ckpt_dir -- otherwise xbank/mbd/
-    # mbd_daily runs of the same model all write into the SAME TensorBoard
-    # log dir and their curves interleave indistinguishably (flagged
-    # 2026-09-17).
     writer = SummaryWriter(f"/app/data/lightning_logs/{data_cfg['name']}_source/{MODEL_NAME}")
 
     for epoch in range(start_epoch, args.max_epochs):

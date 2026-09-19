@@ -13,13 +13,19 @@ saved by train_nep.py) -- see infer_coles.py's identical rationale.
 
 Run parameters live in configs/models/downstream.yaml's `inference:`
 section (shared across all infer_*.py scripts) and configs/models/nep.yaml
-(this architecture's own d_model/num_layers/checkpoint_dir -- must match
-what the checkpoint was actually trained with). The only CLI flags are
---downstream-config/--model-config, to point at different files.
+(this architecture's own d_model/num_layers -- must match what the
+checkpoint was actually trained with). checkpoint_dir is DERIVED from
+--checkpoint-source (default mbd, since MBD is the primary pretraining
+corpus as of 2026-09-14) as /app/data/checkpoints/<source>_source/nep --
+not read from configs/models/nep.yaml, which no longer has that key
+(updated 2026-09-19: a fixed checkpoint_dir in the model config went
+stale every time the primary pretraining source changed; --checkpoint-source
+xbank still works for the historical reference-baseline checkpoint).
 
-Output: one parquet file per target date under <embeds_dir>/nep/, columns
-[inn, date, emb_0..emb_<d_model-1>] -- resumable, a date whose file
-already exists is skipped on the next run.
+Output: one parquet file per target date under
+<embeds_dir>/<checkpoint_source>_source/nep/, columns [inn, date,
+emb_0..emb_<d_model-1>] -- resumable, a date whose file already exists is
+skipped on the next run.
 
 Usage (inside the container):
     python src/training/infer_nep.py
@@ -37,6 +43,8 @@ from data.splits import load_windowed_transactions_for_dates, unpack_window_id
 from models.nep import NEP, extract_embeddings
 from training.common import load_preprocessor
 
+MODEL_NAME = "nep"
+
 XBANK_DATA_CONFIG = "/app/configs/data/xbank.yaml"
 with open(XBANK_DATA_CONFIG) as f:
     TRANSACTIONS_PATH = yaml.safe_load(f)["paths"]["transactions"]
@@ -46,6 +54,17 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--downstream-config", type=str, default="/app/configs/models/downstream.yaml")
     parser.add_argument("--model-config", type=str, default="/app/configs/models/nep.yaml")
+    parser.add_argument(
+        "--checkpoint-source",
+        type=str,
+        default="mbd",
+        help=(
+            "which pretrained checkpoint to load, by the data_config 'name' it was "
+            "trained with -- checkpoint_dir becomes /app/data/checkpoints/<source>_source/"
+            f"{MODEL_NAME}. Default mbd (the primary pretraining corpus); pass xbank for "
+            "the historical reference-baseline checkpoint, or mbd_daily for that variant."
+        ),
+    )
     cli = parser.parse_args()
 
     with open(cli.downstream_config) as f:
@@ -53,8 +72,13 @@ def main():
     with open(cli.model_config) as f:
         model_cfg = yaml.safe_load(f)
 
-    ckpt_dir = Path(model_cfg["checkpoint_dir"])
-    out_dir = Path(inf["embeds_dir"]) / "nep"
+    ckpt_dir = Path(f"/app/data/checkpoints/{cli.checkpoint_source}_source/{MODEL_NAME}")
+    # Diverges by checkpoint_source same as ckpt_dir -- otherwise embeddings
+    # from an xbank-pretrained and an mbd-pretrained checkpoint would
+    # silently land in the SAME output path, each treating the other's
+    # files as "already done" (this script skips a date whose file
+    # already exists) and getting mixed/overwritten (flagged 2026-09-19).
+    out_dir = Path(inf["embeds_dir"]) / f"{cli.checkpoint_source}_source" / MODEL_NAME
     out_dir.mkdir(parents=True, exist_ok=True)
 
     target_dates = [d.strftime("%Y-%m-%d") for d in pd.date_range(inf["start_date"], inf["end_date"], freq="MS")]

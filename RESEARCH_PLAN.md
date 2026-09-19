@@ -11,17 +11,6 @@ companies/legal entities, identified by INN). Transfer quality is scored by
 how well a small downstream probe, trained only on frozen embeddings,
 predicts each dataset's own binary product-propensity targets.
 
-> **Direction, and why it changed (2026-09-14):** the project originally
-> ran the other way — pretrain on xbank, transfer to MBD (five checkpoints
-> were fully trained this way and their in-domain xbank results are
-> already done; see §3's note). The standing decision now is that **no
-> further pretraining happens on xbank data** — MBD becomes the sole
-> pretraining corpus going forward, and xbank becomes purely a transfer/
-> eval target. The five existing xbank-pretrained checkpoints stay in the
-> writeup as a same-institution reference baseline (§3), but nothing new
-> is trained on xbank, and no design decision below should assume
-> otherwise.
-
 Two things differ between the datasets, and this design treats them as
 **two independent axes** rather than one bundled "new bank" shift:
 - **Institution**: xbank vs. MBD — different bank, different client
@@ -304,29 +293,6 @@ default elsewhere.
   slot (`col_11`↔`col_12`) and a couple of the arbitrary categorical
   mappings, re-pretrain, check whether downstream probe metrics move
   meaningfully. Not yet run.
-- ~~Materialize MBD-raw full-scale adapted data~~ **DONE (2026-09-14).**
-  `mbd_data/raw_adapted/` built via `python -m data.mbd_adapter --freq raw`,
-  ALL_FOLDS: 947,899,612 rows, 1,484,490 distinct clients (matches the raw
-  source exactly).
-- ~~Rebuild `mbd_data/daily_adapted/`~~ **DONE (2026-09-14).** Rebuilt via
-  `python -m data.mbd_adapter --freq daily`, ALL_FOLDS: 557,660,428 rows
-  (41.2% reduction from 947,899,612 raw), 1,484,490 distinct clients
-  (matches the raw source exactly), 0 duplicate (id, col_1, col_2..col_14)
-  groups, `col_11` correctly bounded [0, 1]. The first two attempts were
-  silently OOM-killed (process vanished mid-run with no Python traceback
-  at all, RAM fully released right after — the signature of the kernel's
-  OOM killer, not a clean crash) trying to run one combined GROUP BY over
-  all ~950M rows at once. Fixed in `data/mbd_adapter.py` by (a) splitting
-  the aggregation into two passes — labeled folds, then the unlabeled
-  `fold=-1` pool, each written to its own intermediate parquet file, then
-  UNIONed for the final scale-and-write step (verified mathematically
-  equivalent to one combined GROUP BY on a sample before trusting it at
-  full scale — 0 row-level differences) — and (b) capping DuckDB's
-  `memory_limit` well below available RAM so it spills to
-  `/app/data/duckdb_tmp` instead of racing the kernel's OOM killer. Also
-  fixed: DuckDB's default temp-spill directory was relative to the repo
-  mount (host's small, often-full root partition), now pinned to
-  `/app/data/duckdb_tmp` (the big storage mount) explicitly.
 - Build the checkpoint-source / eval-data decoupling described in §4 —
   `infer_mbd.py` currently hardcodes both which MBD variant it embeds
   (`configs/data/mbd.yaml`, always raw) and which checkpoint it loads

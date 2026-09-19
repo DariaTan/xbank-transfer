@@ -12,32 +12,16 @@ run parameter lives in that file, not on the command line) and
 `--data-config` (default `configs/data/xbank.yaml`, kept as the flag's
 default for backward compatibility, but see the standing decision below),
 which selects the pretraining CORPUS -- pass `configs/data/mbd.yaml`
-(raw, MBD's transactions completely untouched -- NOT an "hourly"
-aggregation, nothing is binned to an hour) or `configs/data/mbd_daily.yaml`
+or `configs/data/mbd_daily.yaml`
 (daily-aggregated) instead to pretrain on MBD, holding the rest of the
 script identical (added 2026-09-14, for the raw/daily aggregation-level
-ablation, see RESEARCH_PLAN.md §4). **Standing decision (2026-09-14): no
-further pretraining happens on xbank data** -- MBD is now the only
+ablation, see RESEARCH_PLAN.md §4). MBD is the only
 pretraining corpus actually used going forward; always pass an explicit
 `--data-config configs/data/mbd.yaml` or `mbd_daily.yaml`.
-`checkpoint_dir` is DERIVED from `--data-config`'s own `name:` field, not
-read from `--config` (fixed 2026-09-14 -- it used to be a hardcoded value
-in `configs/models/<model>.yaml`, which meant the same checkpoint_dir was
-used no matter which corpus was actually pretrained on): `xbank.yaml`
-(`name: xbank`) resolves to `/app/data/checkpoints/xbank_source/<model>`,
-`mbd.yaml` to `mbd_source/<model>`, `mbd_daily.yaml` to
-`mbd_daily_source/<model>` -- so two different `--data-config` runs of
-the same model can never collide on the same checkpoint_dir, and there's
-nothing to "pair" manually anymore. The `checkpoint_dir` key still present
-in each `configs/models/<model>.yaml` is read only by the `infer_*.py`
-scripts (always the xbank-pretrained checkpoint, by design -- see their
-own section below). A resume-time guard separately checks `data_config`
-against what a checkpoint was actually started with and refuses to resume
-across a mismatch.
+`checkpoint_dir` is derived from `--data-config`'s own `name`.
 
-- Loads **all** clients from the configured corpus, not a sample
-  (`smoke_*.py` sampled 500 to prove the pipeline works; xbank's real
-  corpus is ~378K clients). Set `n_clients` in `--config` to cap it for a
+- Loads **all** clients from the configured corpus, not a sample.
+  Set `n_clients` in `--config` to cap it for a
   quick debug run.
 - Trains with early stopping on a validation metric (`patience`, default
   5 epochs of no improvement) under a generous `max_epochs` cap (default
@@ -49,21 +33,8 @@ across a mismatch.
   same command picks up where a killed job left off automatically, no
   extra flags needed. xbank-pretrained checkpoints live under
   `/app/data/checkpoints/xbank_source/<model>/`; MBD-pretrained ones
-  should go under the sibling `/app/data/checkpoints/mbd_source/<model>/`
-  (reorganized 2026-09-14 so the two are never mixed up at a glance).
+  should go under the sibling `/app/data/checkpoints/mbd_source/<model>/`.
 
-## Picking a GPU
-
-Both host GPUs (RTX A5000, 24GB each) are shared with other users'
-containers. Check current load before launching:
-
-```bash
-./environments/pick_gpu.sh
-```
-
-Pin a job to one GPU via `CUDA_VISIBLE_DEVICES` on the `docker exec` call
--- the container itself sees both GPUs (`--gpus all` in `drun.sh`), so this
-env var is what actually restricts a given process to one of them.
 
 ## Launching in tmux
 

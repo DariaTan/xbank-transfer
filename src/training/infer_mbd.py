@@ -27,18 +27,28 @@ Run parameters live in configs/models/downstream_mbd.yaml's `inference:`
 section (shared across every --model) and configs/models/<model>.yaml
 (that architecture's own hidden_size/num_layers/etc -- must match what
 the checkpoint was actually trained with; chronos2 has no such file,
-it's zero-shot). The only CLI flags are --model, --downstream-config, and
---model-config, to point at different files.
+it's zero-shot). checkpoint_dir is DERIVED from --checkpoint-source as
+/app/data/checkpoints/<source>_source/<model> -- not read from
+configs/models/<model>.yaml, which no longer has that key (updated
+2026-09-19). UNLIKE the xbank infer_{model}.py scripts (which now default
+--checkpoint-source to mbd, since MBD is the primary pretraining corpus
+as of 2026-09-14), THIS script defaults to xbank -- its established job is
+running some checkpoint zero-shot against MBD, historically always the
+xbank-pretrained one; pass --checkpoint-source mbd or mbd_daily instead
+for the newer in-domain-MBD checks (RESEARCH_PLAN.md §4's "no-shift"
+baselines: pretrain-on-MBD, eval-on-MBD-with-no-institution-change).
 
 Requires data/mbd_adapter.py's output to already exist (run
 `python -m data.mbd_adapter` first) -- this script only consumes the
 adapted parquet files, it doesn't materialize them, since materializing
 is a one-time step shared across every --model run.
 
-Output: one parquet file per target month under <embeds_dir>/<model>/,
-columns [inn, date, emb_0..emb_D] -- same shape as xbank's own embeds
-under /app/data/embeds/, so the same downstream-probe code can be pointed
-at either. Resumable: a date whose file already exists is skipped on the
+Output: one parquet file per target month under
+<embeds_dir>/<checkpoint_source>_source/<model>/ (chronos2, having no
+checkpoint at all, keeps the flat <embeds_dir>/chronos2/ instead), columns
+[inn, date, emb_0..emb_D] -- same shape as xbank's own embeds under
+/app/data/embeds/, so the same downstream-probe code can be pointed at
+either. Resumable: a date whose file already exists is skipped on the
 next run.
 
 Usage (inside the container):
@@ -88,14 +98,14 @@ def _target_dates() -> List[str]:
 
 
 def _load_embedder(
-    model_name: str, model_cfg: Dict, inf: Dict, device: torch.device
+    model_name: str, model_cfg: Dict, inf: Dict, device: torch.device, checkpoint_source: str
 ) -> Callable[[pd.DataFrame], Tuple[np.ndarray, List[str]]]:
     """Loads the checkpoint for `model_name` and returns a closure that
     maps one windowed dataframe -> (embeddings, window_ids). Chronos-2 is
     handled separately in main() (it needs per-date chunking, unlike the
     other four -- see infer_chronos2.py's identical reasoning).
     """
-    ckpt_dir = Path(model_cfg["checkpoint_dir"])
+    ckpt_dir = Path(f"/app/data/checkpoints/{checkpoint_source}_source/{model_name}")
 
     if model_name == "coles":
         from models.coles import build_module, extract_embeddings
@@ -249,6 +259,17 @@ def main():
     parser.add_argument("--model", required=True, choices=["coles", "nep", "mlm", "thp", "chronos2"])
     parser.add_argument("--downstream-config", type=str, default="/app/configs/models/downstream_mbd.yaml")
     parser.add_argument("--model-config", type=str, default=None, help="default /app/configs/models/<model>.yaml")
+    parser.add_argument(
+        "--checkpoint-source",
+        type=str,
+        default="xbank",
+        help=(
+            "which pretrained checkpoint to load, by the data_config 'name' it was "
+            "trained with -- checkpoint_dir becomes /app/data/checkpoints/<source>_source/"
+            "<model>. Default xbank (this script's established zero-shot-transfer role); "
+            "pass mbd or mbd_daily for the in-domain-MBD checks instead."
+        ),
+    )
     cli = parser.parse_args()
 
     with open(cli.downstream_config) as f:
@@ -262,7 +283,13 @@ def main():
 
     _require_adapted_files()
 
-    out_dir = Path(inf["embeds_dir"]) / cli.model
+    # Diverges by checkpoint_source same as ckpt_dir -- otherwise embeddings
+    # from an xbank-pretrained and an mbd-pretrained checkpoint would
+    # silently land in the SAME output path (2026-09-19). Chronos-2 is
+    # zero-shot (no checkpoint at all, see its own module docstring), so
+    # it has no checkpoint_source to diverge by -- keeps its own flat path.
+    out_subdir = cli.model if cli.model == "chronos2" else f"{cli.checkpoint_source}_source/{cli.model}"
+    out_dir = Path(inf["embeds_dir"]) / out_subdir
     out_dir.mkdir(parents=True, exist_ok=True)
 
     target_dates = _target_dates()
@@ -280,7 +307,7 @@ def main():
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Loading {cli.model} checkpoint ...", flush=True)
-    embed = _load_embedder(cli.model, model_cfg, inf, device)
+    embed = _load_embedder(cli.model, model_cfg, inf, device, cli.checkpoint_source)
     print("  loaded.", flush=True)
 
     for target_date in target_dates:

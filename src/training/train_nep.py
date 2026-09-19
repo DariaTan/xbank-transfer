@@ -63,10 +63,6 @@ def main():
     TRANSACTIONS_PATH = data_cfg["paths"]["transactions"]
 
     ckpt_dir = Path(f"/app/data/checkpoints/{data_cfg['name']}_source") / MODEL_NAME
-    # data_config guarded here too -- resuming a checkpoint against a
-    # DIFFERENT dataset than it was started with (e.g. an xbank checkpoint
-    # accidentally resumed with --data-config mbd.yaml) would otherwise
-    # silently mix two different data sources into one run.
     check_or_save_run_config(ckpt_dir, args, ["seed", "valid_frac", "n_clients", "max_seq_len", "data_config"])
 
     columns = [CLIENT_ID_COL, EVENT_TIME_COL] + ALL_FEATURE_COLS
@@ -188,12 +184,6 @@ def main():
             chunk = [recs[j] for j in order[i : i + batch_size]]
             yield collate_feature_dict(chunk).to(device)
 
-    # Diverges by data_cfg['name'] same as ckpt_dir -- otherwise xbank/mbd/
-    # mbd_daily runs of the same model all write into the SAME TensorBoard
-    # log dir and their curves interleave indistinguishably (flagged
-    # 2026-09-17, while an mbd/mbd_daily run of this exact script was
-    # already in progress -- this fix only takes effect on the NEXT
-    # launch, not the currently-running process).
     writer = SummaryWriter(f"/app/data/lightning_logs/{data_cfg['name']}_source/{MODEL_NAME}")
 
     for epoch in range(start_epoch, args.max_epochs):
