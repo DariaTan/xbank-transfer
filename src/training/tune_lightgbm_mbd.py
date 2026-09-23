@@ -1,0 +1,237 @@
+"""Leakage-safe LightGBM tuning on frozen MBD-raw embeddings.
+
+Client-disjoint folds 0-2 train, fold 3 validates hyperparameters and early
+stopping, and fold 4 is read only for the final score. The four product
+targets are independent binary tasks, not a single multiclass label.
+"""
+from __future__ import annotations
+
+import argparse
+import gc
+import json
+import os
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from sklearn.metrics import average_precision_score, roc_auc_score
+
+from data.schema import TARGET_COLS, TARGETS_CLIENT_ID_COL, TARGETS_DATE_COL
+from training.paths import downstream_dir, embedding_dir, evaluation_name, load_data_config
+
+
+TRAIN_FOLDS = (0, 1, 2)
+VAL_FOLD = 3
+TEST_FOLD = 4
+
+
+def _atomic_json(path: Path, data: dict) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(data, indent=2, sort_keys=True))
+    os.replace(temporary, path)
+
+
+def candidate_params(seed: int, trials: int, threads: int) -> list[dict]:
+    """Deterministic small search; the first candidate is the baseline."""
+    if trials < 1 or threads < 1:
+        raise ValueError("trials and threads must be positive")
+    rng = np.random.default_rng(seed)
+    choices = [(31, 300, 0.05, 1.0, 0.0)]
+    space = [(leaves, leaf_min, rate, fraction, l2)
+             for leaves in (15, 31, 63)
+             for leaf_min in (100, 300, 1000)
+             for rate in (0.03, 0.05, 0.08)
+             for fraction in (0.7, 0.9, 1.0)
+             for l2 in (0.0, 1.0, 10.0)]
+    rng.shuffle(space)
+    choices.extend(space[:trials - 1])
+    return [{
+        "objective": "binary",
+        "metric": "average_precision",
+        "verbosity": -1,
+        "num_threads": threads,
+        "seed": seed,
+        "feature_pre_filter": False,
+        "num_leaves": leaves,
+        "min_data_in_leaf": leaf_min,
+        "learning_rate": rate,
+        "feature_fraction": fraction,
+        "lambda_l2": l2,
+    } for leaves, leaf_min, rate, fraction, l2 in choices]
+
+
+def _load_joined(targets_path: Path, embeds_dir: Path) -> tuple[pd.DataFrame, list[str], list[Path]]:
+    files = sorted(embeds_dir.glob("*.parquet"))
+    if not files:
+        raise FileNotFoundError(f"no embeddings under {embeds_dir}")
+    targets = pd.read_parquet(targets_path,
+                              columns=[TARGETS_CLIENT_ID_COL, TARGETS_DATE_COL, "fold", *TARGET_COLS])
+    targets[TARGETS_DATE_COL] = targets[TARGETS_DATE_COL].astype(str)
+    if targets.duplicated([TARGETS_CLIENT_ID_COL, TARGETS_DATE_COL]).any():
+        raise ValueError("MBD targets contain duplicate client-date keys")
+    if targets[TARGET_COLS].isna().any().any() or not targets[TARGET_COLS].isin([0, 1]).all().all():
+        raise ValueError("MBD target labels must be non-null binary values")
+    embeddings = pd.concat((pd.read_parquet(path) for path in files), ignore_index=True)
+    cols = sorted((col for col in embeddings if col.startswith("emb_")),
+                  key=lambda col: int(col.removeprefix("emb_")))
+    if not cols or cols != [f"emb_{i}" for i in range(len(cols))]:
+        raise ValueError("embedding columns must be contiguous emb_0..emb_N")
+    if embeddings.duplicated(["inn", "date"]).any():
+        raise ValueError("embeddings contain duplicate client-date keys")
+    joined = targets.merge(embeddings, left_on=[TARGETS_CLIENT_ID_COL, TARGETS_DATE_COL],
+                           right_on=["inn", "date"], how="inner", validate="one_to_one")
+    if joined.empty:
+        raise ValueError("no target rows match embeddings")
+    if joined.groupby(TARGETS_CLIENT_ID_COL)["fold"].nunique().max() != 1:
+        raise ValueError("a client occurs in multiple MBD folds")
+    if not np.isfinite(joined[cols].to_numpy(dtype=np.float32)).all():
+        raise ValueError("embeddings contain non-finite values")
+    return joined, cols, files
+
+
+def _metrics(labels: np.ndarray, probabilities: np.ndarray) -> dict:
+    if len(np.unique(labels)) != 2:
+        raise ValueError("evaluation partition must contain both target classes")
+    return {
+        "n_rows": int(len(labels)),
+        "prevalence": float(labels.mean()),
+        "pr_auc": float(average_precision_score(labels, probabilities)),
+        "roc_auc": float(roc_auc_score(labels, probabilities)),
+    }
+
+
+def run(model: str, data_config: str, output_root: str, seed: int,
+        trials: int, threads: int, tune_client_cap: int, max_rounds: int) -> None:
+    import lightgbm as lgb
+
+    if tune_client_cap < 1 or max_rounds < 1:
+        raise ValueError("tune-client-cap and max-rounds must be positive")
+    data_cfg = load_data_config(data_config)
+    if evaluation_name(data_cfg) != "mbd_raw":
+        raise ValueError("HPO is restricted to MBD-raw embeddings and targets")
+    targets_path = Path(data_cfg["paths"]["targets"])
+    embeds_dir = embedding_dir("/app/data/embeds", "mbd_raw", "mbd", model)
+    output = downstream_dir(output_root, "mbd_raw", "mbd", model) / "lightgbm_hpo_holdout"
+    output.mkdir(parents=True, exist_ok=True)
+    joined, cols, files = _load_joined(targets_path, embeds_dir)
+    manifest = {
+        "protocol": "client-disjoint folds 0-2 train, 3 validation, 4 untouched test",
+        "model": model,
+        "targets": TARGET_COLS,
+        "target_file": {"path": str(targets_path), "size": targets_path.stat().st_size,
+                        "mtime_ns": targets_path.stat().st_mtime_ns},
+        "embedding_files": [{"path": str(p), "size": p.stat().st_size,
+                             "mtime_ns": p.stat().st_mtime_ns} for p in files],
+        "seed": seed,
+        "trials": trials,
+        "threads": threads,
+        "tune_client_cap": tune_client_cap,
+        "max_rounds": max_rounds,
+    }
+    manifest_path = output / "run_manifest.json"
+    if manifest_path.exists():
+        if json.loads(manifest_path.read_text()) != manifest:
+            raise ValueError(f"run settings differ from existing {manifest_path}")
+    else:
+        _atomic_json(manifest_path, manifest)
+
+    train = joined[joined.fold.isin(TRAIN_FOLDS)]
+    val = joined[joined.fold == VAL_FOLD]
+    test = joined[joined.fold == TEST_FOLD]
+    if min(len(train), len(val), len(test)) == 0:
+        raise ValueError("train, validation and test folds must all be present")
+    clients = np.sort(train[TARGETS_CLIENT_ID_COL].unique())
+    rng = np.random.default_rng(seed)
+    selected = rng.choice(clients, size=min(tune_client_cap, len(clients)), replace=False)
+    tune = train[train[TARGETS_CLIENT_ID_COL].isin(selected)]
+    print(f"{model}: joined={len(joined)} train={len(train)} tune={len(tune)} "
+          f"val={len(val)} test={len(test)} features={len(cols)}", flush=True)
+    X_tune = tune[cols].to_numpy(dtype=np.float32)
+    X_train = train[cols].to_numpy(dtype=np.float32)
+    X_val = val[cols].to_numpy(dtype=np.float32)
+    X_test = test[cols].to_numpy(dtype=np.float32)
+    del joined, targets_path
+    gc.collect()
+
+    candidates = candidate_params(seed, trials, threads)
+    for target in TARGET_COLS:
+        result_path = output / f"{target}_metrics.json"
+        model_path = output / f"{target}_model.txt"
+        if result_path.is_file() and model_path.is_file():
+            print(f"{target}: completed result exists, skipping", flush=True)
+            continue
+        y_tune = tune[target].to_numpy(dtype=np.int8)
+        y_train = train[target].to_numpy(dtype=np.int8)
+        y_val = val[target].to_numpy(dtype=np.int8)
+        if any(len(np.unique(y)) != 2 for y in (y_tune, y_train, y_val)):
+            raise ValueError(f"{target}: a development fold lacks one of the binary classes")
+        tune_set = lgb.Dataset(X_tune, label=y_tune, feature_name=cols, free_raw_data=False)
+        val_set = lgb.Dataset(X_val, label=y_val, reference=tune_set, free_raw_data=False)
+        trial_rows = []
+        best_score = -1.0
+        best_params = None
+        for index, params in enumerate(candidates):
+            booster = lgb.train(params, tune_set, num_boost_round=max_rounds,
+                                valid_sets=[val_set], callbacks=[lgb.early_stopping(40, verbose=False)])
+            rounds = max(1, booster.best_iteration)
+            score = float(average_precision_score(y_val, booster.predict(X_val, num_iteration=rounds)))
+            trial_rows.append({"trial": index, "val_pr_auc": score, "best_iteration": rounds,
+                               **{key: params[key] for key in ("num_leaves", "min_data_in_leaf",
+                                   "learning_rate", "feature_fraction", "lambda_l2")}})
+            pd.DataFrame(trial_rows).to_csv(output / f"{target}_trials.csv", index=False)
+            print(f"{model} {target} trial={index + 1}/{len(candidates)} "
+                  f"val_pr_auc={score:.6f} rounds={rounds}", flush=True)
+            if score > best_score:
+                best_score, best_params = score, params
+            del booster
+        del tune_set, val_set
+        gc.collect()
+
+        full_train_set = lgb.Dataset(X_train, label=y_train, feature_name=cols, free_raw_data=False)
+        full_val_set = lgb.Dataset(X_val, label=y_val, reference=full_train_set, free_raw_data=False)
+        selected_model = lgb.train(best_params, full_train_set, num_boost_round=max_rounds,
+                                   valid_sets=[full_val_set], callbacks=[lgb.early_stopping(40, verbose=False)])
+        final_rounds = max(1, selected_model.best_iteration)
+        final_val = _metrics(y_val, selected_model.predict(X_val, num_iteration=final_rounds))
+        del selected_model, full_train_set, full_val_set
+        gc.collect()
+
+        X_dev = np.concatenate([X_train, X_val], axis=0)
+        y_dev = np.concatenate([y_train, y_val], axis=0)
+        final_model = lgb.train(best_params, lgb.Dataset(X_dev, label=y_dev, feature_name=cols),
+                                num_boost_round=final_rounds)
+        y_test = test[target].to_numpy(dtype=np.int8)
+        test_metrics = _metrics(y_test, final_model.predict(X_test))
+        final_model.save_model(str(model_path))
+        _atomic_json(result_path, {
+            "target": target,
+            "best_params": best_params,
+            "tune_val_pr_auc": best_score,
+            "full_val_metrics": final_val,
+            "final_rounds": final_rounds,
+            "test_metrics": test_metrics,
+            "test_access": "only after all hyperparameters and final rounds were selected",
+        })
+        print(f"{model} {target}: test PR-AUC={test_metrics['pr_auc']:.6f} "
+              f"ROC-AUC={test_metrics['roc_auc']:.6f}", flush=True)
+        del X_dev, y_dev, final_model
+        gc.collect()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", required=True, choices=["coles", "cotic", "thp", "nep", "mlm", "chronos2"])
+    parser.add_argument("--data-config", default="/app/configs/data/mbd.yaml")
+    parser.add_argument("--output-root", default="/app/data/downstream")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--trials", type=int, default=6)
+    parser.add_argument("--threads", type=int, default=6)
+    parser.add_argument("--tune-client-cap", type=int, default=100000)
+    parser.add_argument("--max-rounds", type=int, default=600)
+    args = parser.parse_args()
+    run(args.model, args.data_config, args.output_root, args.seed, args.trials,
+        args.threads, args.tune_client_cap, args.max_rounds)
+
+
+if __name__ == "__main__":
+    main()
