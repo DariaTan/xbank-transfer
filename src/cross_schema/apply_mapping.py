@@ -12,10 +12,11 @@ import json
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from data.mbd_adapter import TRX_CATEGORY_MAP
-from data.schema import ALL_FEATURE_COLS, CATEGORY_COLS, CLIENT_ID_COL, EVENT_TIME_COL, NUMERIC_COLS
+from data.schema import ALL_FEATURE_COLS, CLIENT_ID_COL, EVENT_TIME_COL, NUMERIC_COLS
 
 
 MBD_SLOT_BY_FIELD = {**TRX_CATEGORY_MAP, "amount": "col_11", "event_time": EVENT_TIME_COL}
@@ -86,5 +87,20 @@ class FrozenSchemaMapping:
         for source, field in self.mapping.items():
             slot = MBD_SLOT_BY_FIELD[field]
             if slot in output_slots:
-                aligned[slot] = windowed[source].to_numpy()
+                if slot in NUMERIC_COLS:
+                    aligned[slot] = windowed[source].to_numpy()
+                else:
+                    # MBD adapter cast its integer-like category codes to
+                    # BIGINT before pretraining. Xbank stores many of those
+                    # codes as DOUBLE (e.g. 3.0). The frozen PTLS
+                    # FrequencyEncoder stringifies inputs, where "3.0" is
+                    # *not* the trained key "3". Preserve the matched
+                    # integer code, not a new/refitted vocabulary.
+                    values = pd.to_numeric(windowed[source], errors="raise")
+                    if np.isinf(values.to_numpy(dtype=float, na_value=np.nan)).any():
+                        raise ValueError(f"{source}: infinite category code")
+                    fractional = values.notna() & (values % 1 != 0)
+                    if fractional.any():
+                        raise ValueError(f"{source}: non-integer category code")
+                    aligned[slot] = values.astype("Int64")
         return aligned

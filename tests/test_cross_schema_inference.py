@@ -26,14 +26,15 @@ class CrossSchemaInferenceTests(unittest.TestCase):
             window = pd.DataFrame({
                 "id": ["client::2023-01-01"],
                 "col_1": pd.to_datetime(["2022-12-31"]),
-                "col_2": [81],
-                "col_10": [17],
+                "col_2": [81.0],
+                "col_10": [17.0],
                 "col_12": [0.75],
             })
             self.assertEqual(mapping.source_columns("coles"),
                              ["id", "col_1", "col_2", "col_10", "col_12"])
             aligned = mapping.transform(window, "coles")
             self.assertEqual(aligned.at[0, "col_2"], 17)  # event_type
+            self.assertEqual(str(aligned.at[0, "col_2"]), "17")  # PTLS key, not "17.0"
             self.assertEqual(aligned.at[0, "col_7"], 81)  # dst_type11
             self.assertEqual(aligned.at[0, "col_11"], 0.75)  # amount
             self.assertEqual(aligned.at[0, "col_3"], 0)  # unfilled MBD field
@@ -42,6 +43,19 @@ class CrossSchemaInferenceTests(unittest.TestCase):
             self.assertEqual(mapping.transform(window, "cotic").at[0, "col_2"], 17)
             self.assertEqual(mapping.source_columns("chronos2"), ["id", "col_1", "col_12"])
             self.assertEqual(mapping.transform(window, "chronos2").at[0, "col_11"], 0.75)
+
+    def test_fractional_category_code_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            mapping = self._mapping(Path(temp), {
+                "col_1": "event_time", "col_10": "event_type",
+            })
+            window = pd.DataFrame({
+                "id": ["client::2023-01-01"],
+                "col_1": pd.to_datetime(["2022-12-31"]),
+                "col_10": [3.5],
+            })
+            with self.assertRaisesRegex(ValueError, "non-integer category code"):
+                mapping.transform(window, "cotic")
 
     def test_invalid_mapping_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
