@@ -190,6 +190,20 @@ use `configs/data/mbd_smoke.yaml` plus
 `configs/models/downstream_mbd_smoke.yaml`; smoke outputs never share the
 production directory.
 
+Chronos-2 is a separate zero-shot control on MBD-raw. Its source transactions
+are aggregated to daily amount sums once, then 32 independent client shards
+are split between two GPUs. Unlike the five event models, Chronos sees the
+full 12-month daily history, with no 500-transaction cap. On the Docker host:
+
+```bash
+./environments/run_chronos_mbd_raw.sh
+```
+
+The resumable job first writes its daily cache under
+`/app/data/chronos2_daily_cache/mbd_raw`, then publishes embeddings under
+`/app/data/embeds/mbd_raw/zero_shot/chronos2`. Logs are
+`/app/data/logs/chronos_mbd_raw_{prepare,gpu0,gpu1,finalize}.log`.
+
 Reads the same two-config split as the xbank scripts above, just against
 `configs/models/downstream_mbd.yaml`'s `inference:` section instead.
 Output: `<embeds_dir>/<evaluation_name>/<checkpoint_source>_source/<model>/<date>.parquet`,
