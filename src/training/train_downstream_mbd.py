@@ -24,9 +24,8 @@ guarantees no client straddles train/test in any rotation -- no
 additional client-id split is needed at that boundary, only for carving
 val out of each rotation's training folds.
 
-Requires infer_mbd.py's embeddings (--output-dir, default
-/app/data/embeds_mbd/<model>/) and data/mbd_adapter.py's adapted targets
-to already exist.
+Requires infer_mbd.py's source- and evaluation-namespaced embeddings and
+data/mbd_adapter.py's adapted targets to already exist.
 
 Usage (inside the container):
     python -m data.mbd_adapter          # once
@@ -46,7 +45,7 @@ import yaml
 from sklearn.model_selection import GroupShuffleSplit
 
 from data.schema import TARGET_COLS, TARGETS_CLIENT_ID_COL, TARGETS_DATE_COL
-from training.infer_mbd import MBD_TARGETS_PATH
+from training.paths import downstream_dir, embedding_dir, evaluation_name, load_data_config
 from training.train_downstream import (
     MLP,
     emb_cols,
@@ -67,7 +66,7 @@ def load_config(config_path: str) -> Dict:
         cfg = yaml.safe_load(f)["probe"]
     return {
         "max_neg_ratio": cfg.get("max_neg_ratio"),
-        "embeds_dir": cfg.get("embeds_dir", "/app/data/embeds_mbd"),
+        "embeds_dir": cfg.get("embeds_dir", "/app/data/embeds"),
         "checkpoint_dir": cfg.get("checkpoint_dir"),
         "val_frac": cfg.get("val_frac", 0.15),
         "seed": cfg.get("seed", 0),
@@ -79,8 +78,8 @@ def load_config(config_path: str) -> Dict:
     }
 
 
-def load_targets() -> pd.DataFrame:
-    targets = pd.read_parquet(MBD_TARGETS_PATH)
+def load_targets(targets_path: str) -> pd.DataFrame:
+    targets = pd.read_parquet(targets_path)
     targets[TARGETS_DATE_COL] = targets[TARGETS_DATE_COL].astype(str)
     return targets
 
@@ -182,8 +181,10 @@ def run_rotation(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", required=True, choices=["coles", "nep", "mlm", "thp", "chronos2"])
+    parser.add_argument("--model", required=True, choices=["coles", "cotic", "nep", "mlm", "thp", "chronos2"])
     parser.add_argument("--config", type=str, default="/app/configs/models/downstream_mbd.yaml")
+    parser.add_argument("--data-config", type=str, default="/app/configs/data/mbd.yaml")
+    parser.add_argument("--checkpoint-source", type=str, default="mbd")
     parser.add_argument(
         "--eval-only",
         action="store_true",
@@ -196,6 +197,8 @@ def main():
     cli = parser.parse_args()
 
     cfg = load_config(cli.config)
+    data_cfg = load_data_config(cli.data_config)
+    eval_name = evaluation_name(data_cfg)
     mlp_args = SimpleNamespace(
         hidden=cfg["hidden"],
         lr=cfg["lr"],
@@ -204,18 +207,24 @@ def main():
         batch_size=cfg["batch_size"],
     )
 
-    ckpt_dir = Path(cfg["checkpoint_dir"] or f"/app/data/downstream_mbd/{cli.model}")
+    ckpt_dir = downstream_dir(
+        cfg["checkpoint_dir"] or "/app/data/downstream",
+        eval_name,
+        cli.checkpoint_source,
+        cli.model,
+    )
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     print(f"max_neg_ratio: {cfg['max_neg_ratio']}  (from {cli.config})", flush=True)
 
     print(f"Loading {cli.model} MBD embeddings ...", flush=True)
-    embeds = load_embeddings(Path(cfg["embeds_dir"]), cli.model)
+    embeds_path = embedding_dir(cfg["embeds_dir"], eval_name, cli.checkpoint_source, cli.model)
+    embeds = load_embeddings(embeds_path.parent, cli.model)
     print(f"  {len(embeds)} rows across {embeds['date'].nunique()} dates", flush=True)
 
     print("Loading MBD targets ...", flush=True)
-    targets = load_targets()
+    targets = load_targets(data_cfg["paths"]["targets"])
 
     joined = targets.merge(
         embeds,

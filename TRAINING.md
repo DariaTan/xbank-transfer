@@ -12,12 +12,10 @@ run parameter lives in that file, not on the command line) and
 `--data-config` (default `configs/data/xbank.yaml`, kept as the flag's
 default for backward compatibility, but see the standing decision below),
 which selects the pretraining CORPUS -- pass `configs/data/mbd.yaml`
-or `configs/data/mbd_daily.yaml`
-(daily-aggregated) instead to pretrain on MBD, holding the rest of the
-script identical (added 2026-09-14, for the raw/daily aggregation-level
-ablation, see RESEARCH_PLAN.md §4). MBD is the only
-pretraining corpus actually used going forward; always pass an explicit
-`--data-config configs/data/mbd.yaml` or `mbd_daily.yaml`.
+to pretrain on MBD-raw. `configs/data/mbd_daily.yaml` is now an
+inference-only aggregation-shift corpus; no new MBD-daily pretraining is
+planned. Always pass `--data-config configs/data/mbd.yaml` explicitly for
+the production training run.
 `checkpoint_dir` is derived from `--data-config`'s own `name`.
 
 - Loads **all** clients from the configured corpus, not a sample.
@@ -38,18 +36,14 @@ pretraining corpus actually used going forward; always pass an explicit
 
 ## Launching in tmux
 
-One tmux session per model, so a closed SSH connection doesn't kill
-training and you can reattach any time to watch progress. `tee` writes the
-log to a file while still showing it live if you're attached at launch
-time:
+Run tmux inside the persistent container, but invoke it from the Docker
+host. One session per model means a closed SSH connection does not kill the
+job. Always pass the data config explicitly; the training entry points keep
+their historical xbank default for backward compatibility.
 
 ```bash
-mkdir -p /app/data/logs
-CUDA_VISIBLE_DEVICES=0 xbank-transfer python src/training/train_coles.py 2>&1 | tee /app/data/logs/coles.log
-CUDA_VISIBLE_DEVICES=1 xbank-transfer python src/training/train_cotic.py 2>&1 | tee /app/data/logs/cotic.log
-СUDA_VISIBLE_DEVICES=0 xbank-transfer python src/training/train_thp.py   2>&1 | tee /app/data/logs/thp.log
-CUDA_VISIBLE_DEVICES=1 xbank-transfer python src/training/train_nep.py   2>&1 | tee /app/data/logs/nep.log
-CUDA_VISIBLE_DEVICES=0 xbank-transfer python src/training/train_mlm.py   2>&1 | tee /app/data/logs/mlm.log
+docker exec xbank-transfer tmux new-session -d -s coles \
+  'cd /app && CUDA_VISIBLE_DEVICES=0 python src/training/train_coles.py --data-config /app/configs/data/mbd.yaml 2>&1 | tee -a /app/data/logs/coles_mbd_raw.log'
 ```
 
 That's two models per GPU as a starting guess (CoLES+THP+MLM on GPU 0,
@@ -64,15 +58,15 @@ its memory on process exit).
 **Watching progress:**
 
 ```bash
-tail -f /app/data/logs/coles.log      # simplest, no attach needed
-tmux attach -t coles                # or attach directly; Ctrl-b d to detach without killing it
+docker exec xbank-transfer tail -f /app/data/logs/coles_mbd_raw.log
+docker exec -it xbank-transfer tmux attach -t coles  # Ctrl-b d to detach
 ```
 
 **Managing sessions:**
 
 ```bash
-tmux ls                             # list running sessions
-tmux kill-session -t coles          # stop one (job keeps its last checkpoint, resumable later)
+docker exec xbank-transfer tmux ls
+docker exec xbank-transfer tmux kill-session -t coles
 ```
 
 ## Watching curves in TensorBoard
@@ -143,10 +137,9 @@ python src/training/infer_cotic.py
 python src/training/infer_chronos2.py
 ```
 
-Output: one parquet file per target date under `<embeds_dir>/<model>/`
-(default `/app/data/embeds/<model>/`), columns `[inn, date, emb_0..emb_D]`
+Output: one parquet file per target date under the source-namespaced output
+directory, columns `[inn, date, emb_0..emb_D]`
 -- resumable, a date whose file already exists is skipped on the next
-run. Chronos-2 additionally chunks clients within a date (heavier
 per-client than the other five, via `chronos2_chunk_size`/
 `chronos2_batch_size` in the same `inference:` section); see that
 script's own docstring for the chunk-merge-cleanup mechanics.
@@ -158,23 +151,52 @@ frozen checkpoints zero-shot over MBD (Sber's public benchmark --
 `data/mbd_adapter.py` reshapes it into xbank's own column convention
 first; run its adapter once before this):
 
+MBD-raw inference with MBD-raw checkpoints is the current production path.
+From the Docker host, launch at most two models at a time with the helper:
+
 ```bash
-python -m data.mbd_adapter          # once, materializes the adapted parquet files
-python src/training/infer_mbd.py --model coles
-python src/training/infer_mbd.py --model nep
-python src/training/infer_mbd.py --model mlm
-python src/training/infer_mbd.py --model thp
-python src/training/infer_mbd.py --model chronos2
+./environments/run_infer_mbd_raw.sh coles cotic
 ```
+
+To run the complete MBD-raw then MBD-daily matrix unattended, start the two
+sequential GPU queues:
+
+```bash
+./environments/run_infer_mbd_queues.sh
+```
+
+GPU 0 runs CoLES/THP/MLM and GPU 1 runs COTIC/NEP. Each queue finishes its
+raw jobs before continuing with the same models on daily input. A failed job
+stops only its own queue so the error is not hidden by later jobs.
+
+The equivalent command inside the container is:
+
+```bash
+python src/training/infer_mbd.py \
+  --model coles \
+  --data-config /app/configs/data/mbd.yaml \
+  --downstream-config /app/configs/models/downstream_mbd.yaml \
+  --checkpoint-source mbd
+```
+
+The job only processes clients present in MBD targets, runs in resumable
+client chunks, and writes atomically to
+`/app/data/embeds/mbd_raw/mbd_source/<model>/`. Since `/app/data` is the
+container bind mount, these files physically live under
+`/mnt/storage/d.tanyushkina/transactions/embeds/` on the server.
+
+For a local smoke test, set `XBANK_DATA_ROOT` to a writable fixture root and
+use `configs/data/mbd_smoke.yaml` plus
+`configs/models/downstream_mbd_smoke.yaml`; smoke outputs never share the
+production directory.
 
 Reads the same two-config split as the xbank scripts above, just against
 `configs/models/downstream_mbd.yaml`'s `inference:` section instead.
-Output: `<embeds_dir>/<model>/<date>.parquet` (default
-`/app/data/embeds_mbd/<model>/`), one file per month that actually
+Output: `<embeds_dir>/<evaluation_name>/<checkpoint_source>_source/<model>/<date>.parquet`,
+one file per month that actually
 appears in MBD's own targets file -- not xbank's calendar grid (MBD's
 target months and xbank's aren't on the same calendar axis; see
-RESEARCH_PLAN.md's "ID / date splitting (transfer, MBD)"). COTIC isn't
-wired into this consolidated dispatch yet (see infer_mbd.py's docstring).
+RESEARCH_PLAN.md's "ID / date splitting (transfer, MBD)").
 
 ## Downstream classification probe
 
@@ -192,10 +214,12 @@ python src/training/train_downstream.py --model coles --eval-only   # re-score s
 # MBD transfer: out-of-fold rotation across every client-disjoint fold
 # present (the paper's own protocol -- it names no single canonical test
 # fold, see RESEARCH_PLAN.md), reported as mean +/- std across rotations
-python src/training/train_downstream_mbd.py --model coles
+python src/training/train_downstream_mbd.py \
+  --model coles \
+  --data-config /app/configs/data/mbd.yaml \
+  --checkpoint-source mbd
 ```
 
 Output: `lgbm_<target>.txt`/`mlp_<target>.pt` per target column, plus
-`results.csv` (xbank, under `/app/data/downstream/<model>/` by default) or
-`results_all_folds.csv`/`results_aggregated.csv` (MBD, under
-`/app/data/downstream_mbd/<model>/` by default).
+`results.csv` (xbank) or `results_all_folds.csv`/`results_aggregated.csv`
+(MBD, under `/app/data/downstream/<evaluation>/<source>/<model>/`).

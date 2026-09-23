@@ -7,8 +7,8 @@
 #              (src/training/train_downstream_mbd.py)
 # infer_mbd.py also reads each architecture's own params (hidden_size/
 # num_layers/etc, which must match what the checkpoint was trained with)
-# from configs/train/<model>.yaml, not from here -- same split as
-# configs/train/downstream.yaml's xbank counterpart.
+# from configs/models/<model>.yaml, not from here -- same split as
+# configs/models/downstream.yaml's xbank counterpart.
 
 inference:
   n_clients: null   # cap for a quick debug run; null uses all labeled clients
@@ -16,15 +16,21 @@ inference:
   history_window_months: 12
   max_seq_len: 500
   batch_size: 256
+  # All architectures are processed in bounded client chunks so full MBD
+  # inference never materializes every labeled client's history at once.
+  # 100K is sized for the server's 125 GiB RAM and avoids rescanning the
+  # single 16 GiB raw parquet thousands of times. Start only two models at
+  # once (one per GPU) and lower this if observed host RAM demands it.
+  client_chunk_size: 100000
   # chronos2 only -- heavier per-sample than the other architectures, so
   # it gets its own (smaller) batch size and per-date chunking instead of
   # the shared batch_size above.
   chronos2_batch_size: 64
   chronos2_chunk_size: 2000
   chronos2_value_col: col_11
-  # Base output dir -- infer_mbd.py writes to <embeds_dir>/<model>/,
-  # matching probe.embeds_dir's own convention below.
-  embeds_dir: /app/data/embeds_mbd
+  # Base output dir. infer_mbd.py appends
+  # <evaluation_name>/<checkpoint_source>_source/<model>/.
+  embeds_dir: /app/data/embeds
 
 # MBD's paper (Sec 4.1) specifies an "out-of-fold validation protocol":
 # 5 CLIENT-DISJOINT folds (client_split/fold=0..4), 4 for training and 1
@@ -36,11 +42,11 @@ inference:
 # "ID / date splitting (transfer, MBD)").
 probe:
   # Optional undersampling cap for the per-target LightGBM/MLP training
-  # set -- same semantics as configs/train/downstream.yaml's max_neg_ratio.
+  # set -- same semantics as configs/models/downstream.yaml's max_neg_ratio.
   max_neg_ratio: null
 
-  embeds_dir: /app/data/embeds_mbd
-  checkpoint_dir: null   # null derives /app/data/downstream_mbd/<model>
+  embeds_dir: /app/data/embeds
+  checkpoint_dir: null   # null derives /app/data/downstream/<eval>/<source>/<model>
 
   # Fraction of train-fold unique client ids held out for validation
   # (GroupShuffleSplit -- by id, not by row; already fold-disjoint from

@@ -1,0 +1,23 @@
+inference:
+  n_clients: null
+  seed: 0
+  history_window_months: 12
+  max_seq_len: 32
+  batch_size: 8
+  client_chunk_size: 5
+  chronos2_batch_size: 4
+  chronos2_chunk_size: 5
+  chronos2_value_col: col_11
+  embeds_dir: /app/data/embeds_smoke
+
+probe:
+  max_neg_ratio: null
+  embeds_dir: /app/data/embeds_smoke
+  checkpoint_dir: null
+  val_frac: 0.2
+  seed: 0
+  max_epochs: 2
+  patience: 1
+  batch_size: 16
+  hidden: 16
+  lr: 0.001

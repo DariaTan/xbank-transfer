@@ -68,6 +68,7 @@ def load_windowed_transactions_for_dates(
     history_window_months: int,
     max_seq_len: int,
     client_ids: Optional[List[str]] = None,
+    columns: Optional[List[str]] = None,
 ) -> pd.DataFrame:
     """Windowed/synthetic-id-stamped transactions for a fixed calendar-date
     grid applied to EVERY client (e.g. "the 1st of each month") -- the
@@ -76,8 +77,10 @@ def load_windowed_transactions_for_dates(
     computed with a duckdb CROSS JOIN rather than materializing the cross
     product in Python first.
 
-    `client_ids`, if given, restricts to a subset (debug runs); omit to use
-    every client in the transactions table.
+    `client_ids`, if given, restricts to a subset. `columns`, if given,
+    projects inside DuckDB before materializing pandas data; it must include
+    the client-id and event-time columns. This is especially important for
+    THP/COTIC, which only need one event-type field from the wide table.
     """
     con = duckdb.connect()
 
@@ -90,9 +93,19 @@ def load_windowed_transactions_for_dates(
 
     date_values = ", ".join(f"(DATE '{d}')" for d in target_dates)
 
+    if columns is None:
+        projected = f"tx.* EXCLUDE ({CLIENT_ID_COL})"
+    else:
+        required = {CLIENT_ID_COL, EVENT_TIME_COL}
+        missing = required - set(columns)
+        if missing:
+            raise ValueError(f"columns must include {sorted(missing)}")
+        projected_cols = [c for c in columns if c != CLIENT_ID_COL]
+        projected = ", ".join(f"tx.{c}" for c in projected_cols)
+
     windowed_query = f"""
         SELECT
-            tx.* EXCLUDE ({CLIENT_ID_COL}),
+            {projected},
             tx.{CLIENT_ID_COL} || '{WINDOW_ID_SEP}' || CAST(d.target_date AS VARCHAR)
                 AS {CLIENT_ID_COL}
         FROM read_parquet(?) AS tx

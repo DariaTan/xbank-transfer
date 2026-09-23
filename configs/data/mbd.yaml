@@ -8,9 +8,9 @@
 # 1. PRETRAINING SOURCE: every train_{model}.py script takes this file
 #    directly as --data-config, pretraining on MBD's transactions exactly
 #    as they ship -- RAW, untouched, one row per transaction (see "raw
-#    vs. hourly" note below). See configs/data/mbd_daily.yaml for the
-#    daily-aggregated sibling config used for the aggregation-level
-#    ablation, holding institution fixed (RESEARCH_PLAN.md §4).
+#    vs. hourly" note below). configs/data/mbd_daily.yaml is the
+#    daily-aggregated inference corpus used for the aggregation-level
+#    shift measurement; it is not a second pretraining corpus.
 # 2. Its OWN in-domain eval target: the labeled folds' targets (below)
 #    are what train_downstream_mbd.py rotates through to score an
 #    MBD-pretrained checkpoint against MBD's own labels -- this is the
@@ -18,6 +18,7 @@
 # It is NOT a cross-institution transfer target for an xbank-pretrained
 # checkpoint any more -- that was the original (now reversed) direction.
 name: mbd
+evaluation_name: mbd_raw
 role: pretrain_and_in_domain_eval
 
 # "raw", not "hourly": freq=None in data/mbd_adapter.py does NOT aggregate

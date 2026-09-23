@@ -42,10 +42,7 @@ from sklearn.model_selection import GroupShuffleSplit
 
 from data.schema import TARGET_COLS, TARGETS_CLIENT_ID_COL, TARGETS_DATE_COL
 from training.common import EarlyStopper
-
-XBANK_DATA_CONFIG = "/app/configs/data/xbank.yaml"
-with open(XBANK_DATA_CONFIG) as f:
-    TARGETS_PATH = yaml.safe_load(f)["paths"]["targets"]
+from training.paths import load_data_config
 
 
 def load_embeddings(embeds_dir: Path, model: str) -> pd.DataFrame:
@@ -55,8 +52,8 @@ def load_embeddings(embeds_dir: Path, model: str) -> pd.DataFrame:
     return pd.concat([pd.read_parquet(p) for p in paths], ignore_index=True)
 
 
-def load_targets() -> pd.DataFrame:
-    targets = pd.read_parquet(TARGETS_PATH)
+def load_targets(targets_path: str) -> pd.DataFrame:
+    targets = pd.read_parquet(targets_path)
     targets[TARGETS_DATE_COL] = targets[TARGETS_DATE_COL].astype(str)
     return targets
 
@@ -98,7 +95,7 @@ def load_config(config_path: str) -> Dict:
     }
 
 
-def check_required_months(targets: pd.DataFrame, required_dates: List[str]) -> None:
+def check_required_months(targets: pd.DataFrame, required_dates: List[str], targets_path: str = "targets") -> None:
     """The target data is known to skip some months entirely for every
     client (e.g. Nov/Dec 2023, per data/schema.py) -- not missing data
     we're failing to load, but a real gap. Warns (doesn't raise) if any
@@ -111,7 +108,7 @@ def check_required_months(targets: pd.DataFrame, required_dates: List[str]) -> N
     if missing:
         print(
             f"WARNING: {len(missing)} configured month(s) have no rows at all in "
-            f"{TARGETS_PATH}: {missing}",
+            f"{targets_path}: {missing}",
             flush=True,
         )
 
@@ -284,6 +281,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True, choices=["coles", "nep", "mlm", "thp", "chronos2"])
     parser.add_argument("--config", type=str, default="/app/configs/models/downstream.yaml")
+    parser.add_argument("--data-config", type=str, default="/app/configs/data/xbank.yaml")
     parser.add_argument(
         "--eval-only",
         action="store_true",
@@ -297,6 +295,7 @@ def main():
     cli = parser.parse_args()
 
     cfg = load_config(cli.config)
+    data_cfg = load_data_config(cli.data_config)
     mlp_args = SimpleNamespace(
         hidden=cfg["hidden"],
         lr=cfg["lr"],
@@ -321,8 +320,9 @@ def main():
     print(f"  {len(embeds)} rows across {embeds['date'].nunique()} dates", flush=True)
 
     print("Loading targets ...", flush=True)
-    targets = load_targets()
-    check_required_months(targets, cfg["train"] + cfg["test"])
+    targets_path = data_cfg["paths"]["targets"]
+    targets = load_targets(targets_path)
+    check_required_months(targets, cfg["train"] + cfg["test"], targets_path)
 
     joined = targets.merge(
         embeds,

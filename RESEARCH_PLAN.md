@@ -22,8 +22,10 @@ Two things differ between the datasets, and this design treats them as
   and is adapted (`data/mbd_adapter.py`) into BOTH forms — its native raw
   form, completely untouched (NOT an "hourly aggregation" — nothing is
   binned to an hour, each row is just one unmodified transaction), and a
-  daily-aggregated version matching xbank's own row convention — so a
-  model can be pretrained on MBD at either granularity (§4).
+  daily-aggregated version matching xbank's own row convention. The final
+  deadline-constrained protocol pretrains once on MBD-raw and applies that
+  same frozen checkpoint to all three evaluation corpora (§4); there is no
+  MBD-daily pretraining arm.
 
 In short: **does a transaction-sequence FM's representation generalize
 across a bank boundary**, independently of whether it also has to
@@ -47,12 +49,12 @@ which of the five pretraining objectives degrades least on each axis?
   usually evaluated separately in the literature. Here all five are
   pretrained on identical data/splits and probed identically, so differences
   are attributable to the objective, not to incidental protocol differences.
-- **Institution shift and aggregation-level shift studied as separable
-  axes, not one bundled confound.** Pretraining on both a raw (untouched)
-  and a daily-aggregated version of the *same* MBD corpus, then
-  transferring each to xbank (always daily), lets §4's three-experiment
-  design isolate "does aggregation level matter" from "does institution
-  matter" instead of only ever being able to report their sum.
+- **Institution shift and aggregation-level shift evaluated with one frozen
+  source model.** A checkpoint pretrained once on MBD-raw is evaluated on
+  MBD-raw, MBD-daily, and xbank-daily. MBD-raw vs. MBD-daily measures the
+  within-institution aggregation shift; MBD-daily vs. xbank-daily measures
+  the additional institution shift when both evaluation inputs are daily.
+  This three-cell design does not identify a separate interaction term.
 - **Aggregation-level mismatch as an explicit hypothesis, not a footnote —
   now in the direction of information LOSS, not novelty.** THP/COTIC's
   entire training signal is inter-arrival time between individual events.
@@ -79,18 +81,18 @@ which of the five pretraining objectives degrades least on each axis?
 
 | Model | Family | Signal used | xbank checkpoint (historical reference baseline) | MBD checkpoint (primary, going forward) |
 |---|---|---|---|---|
-| CoLES | Contrastive metric learning (ptls) | Full event, subsequence splitter | Done, in-domain eval done | Not started |
-| NEP | Autoregressive transformer (next-event prediction) | Full event | Done, in-domain eval partial | Not started |
-| MLM | Bidirectional transformer, masked-event objective | Full event | Done, in-domain eval not started | Not started |
-| THP | Transformer Hawkes Process (TPP, continuous-time intensity) | Event time + type only | Done, in-domain eval done | Not started |
-| COTIC | Continuous-time convolutional TPP | Event time + type only | Done, checkpointed, inference not built | Not started |
+| CoLES | Contrastive metric learning (ptls) | Full event, subsequence splitter | Done, in-domain eval done | MBD-raw done |
+| NEP | Autoregressive transformer (next-event prediction) | Full event | Done, in-domain eval partial | MBD-raw done |
+| MLM | Bidirectional transformer, masked-event objective | Full event | Done, in-domain eval not started | MBD-raw done |
+| THP | Transformer Hawkes Process (TPP, continuous-time intensity) | Event time + type only | Done, in-domain eval done | MBD-raw done |
+| COTIC | Continuous-time convolutional TPP | Event time + type only | Done, checkpointed, inference not built | MBD-raw done |
 | Chronos-2 | Zero-shot pretrained univariate time-series FM (external baseline, no xbank/MBD-specific training at all) | Amount series only (`col_11`) | Embeddings computed, in-domain eval done | N/A (zero-shot, no pretraining corpus at all) |
 
 The five xbank checkpoints predate the 2026-09-14 direction decision (§1)
 and are kept as a same-institution upper-bound reference — "what if the FM
 had been pretrained on the eval institution itself" — not as an arm that
-gets further developed. All new pretraining work targets the "MBD
-checkpoint" column, at both aggregation levels described in §4.
+gets further developed. The production checkpoints are the five MBD-raw
+checkpoints; MBD-daily is an inference corpus only.
 
 Chronos-2 is a deliberate control: since it never trained on either bank's
 data on any objective, its transfer "gap" (if any) isolates how much of the
@@ -134,12 +136,12 @@ eval-only design):**
    (**raw** — MBD's transactions completely untouched, one row per
    transaction, NOT an "hourly aggregation" — `configs/data/mbd.yaml`) or
    `freq="D"` (daily-aggregated to xbank's own (client, day, category) row
-   convention — `configs/data/mbd_daily.yaml`). **This adapted file is now
-   the actual pretraining corpus** passed to `train_{model}.py` via
-   `--data-config`, not just a one-off inference input — so whatever
+   convention — `configs/data/mbd_daily.yaml`). The raw adapted file is the
+   actual pretraining corpus passed to `train_{model}.py`; the daily file is
+   used only at inference time for the aggregation-shift measurement. Thus whatever
    category vocabulary a model's embedding tables learn comes from MBD's
    values sitting in xbank's named slots, not from xbank's own codes. Both
-   variants include MBD's unlabeled `fold=-1` pool alongside the labeled
+   adapted transaction variants include MBD's unlabeled `fold=-1` pool alongside the labeled
    folds (decided 2026-09-14, see point 4 below) — only the targets file
    stays restricted to labeled folds.
 2. **No adapter is needed on the xbank side.** xbank's real transactions
@@ -150,27 +152,19 @@ eval-only design):**
    xbank's own unmodified transactions/targets, once the checkpoint-source
    override described in §6 is built (today those scripts assume an
    xbank-pretrained checkpoint).
-3. **Three pretrain→eval pairs**, isolating institution and aggregation
-   level as independent axes rather than one bundled shift:
+3. **One pretraining corpus, three evaluation corpora.** Every trainable
+   architecture uses the same MBD-raw checkpoint:
 
    | # | Pretrain on | Eval on | Isolates |
    |---|---|---|---|
-   | 1 | MBD-raw | MBD-daily | **aggregation-level shift alone** — same institution, same clients/folds, only the eval-time input granularity changes |
-   | 2 | MBD-daily | xbank-daily | **institution shift alone** — both sides are daily-aggregated, so this is the "clean" cross-institution transfer test, not confounded by MBD's native raw precision |
-   | 3 | MBD-raw | xbank-daily | **both shifts at once** — institution AND aggregation change together; the "everything default" case if aggregation level were never controlled for |
+   | 1 | MBD-raw | MBD-raw | **in-domain reference** — no institution or aggregation change |
+   | 2 | MBD-raw | MBD-daily | **aggregation shift** — same institution and labeled population, daily input at evaluation |
+   | 3 | MBD-raw | xbank-daily | **total transfer shift** — institution and aggregation differ from pretraining |
 
-   Two "no-shift" baselines are implicit, not separate experiments:
-   pretrain MBD-raw→eval MBD-raw, and pretrain MBD-daily→eval
-   MBD-daily, are both just the existing in-domain MBD probe
-   (`train_downstream_mbd.py`) run once per pretraining corpus.
-
-   **Interpretation (informal, not a formal ANOVA):** if #3's degradation
-   is roughly #1's + #2's, that's evidence the two shifts act
-   independently; if #3 is meaningfully worse than that sum, that's
-   evidence of an interaction — the FM specifically struggles with
-   novel-institution-and-novel-aggregation together, not just either
-   alone. Worth stating either way, not just reporting #3 in isolation as
-   "the" transfer number.
+   Comparing rows 2 and 3 estimates the additional institution effect
+   conditional on both evaluation inputs being daily. With only these three
+   cells, a separate aggregation-by-institution interaction is not
+   identifiable and must not be reported as an independently measured term.
 
    Weekly aggregation was considered and dropped from this concrete design
    (not built, and a third aggregation level isn't needed to answer the

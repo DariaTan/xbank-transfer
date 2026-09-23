@@ -4,17 +4,17 @@
 # build_mbd_transactions(freq="D")) instead of kept RAW (mbd.yaml's
 # freq=None, MBD's transactions completely untouched -- NOT "hourly",
 # see mbd.yaml's note, corrected 2026-09-14). See mbd.yaml for everything
-# else (client domain, source paper, target schema, pretraining-source
-# role) -- duplicated here only where it actually differs.
+# else (client domain, source paper, target schema) -- duplicated here only
+# where the inference representation actually differs.
 #
-# Purpose: an aggregation-level-only ablation. Pretraining CoLES (say) on
-# this file vs. on mbd.yaml holds institution and client population fixed
-# and changes only the row granularity -- isolating "does aggregation
-# level matter" from "does institution matter" (RESEARCH_PLAN.md §4).
+# Purpose: inference-only aggregation-shift evaluation. A checkpoint trained
+# on MBD-raw (mbd.yaml) is applied to this daily representation; there is no
+# MBD-daily pretraining arm in the deadline-constrained protocol.
 # Weekly was considered and dropped -- only raw (mbd.yaml) and daily
 # (this file) are built.
 name: mbd_daily
-role: pretrain_and_in_domain_eval
+evaluation_name: mbd_daily
+role: inference_only_aggregation_shift
 
 source:
   paper: "https://arxiv.org/abs/2409.17587"

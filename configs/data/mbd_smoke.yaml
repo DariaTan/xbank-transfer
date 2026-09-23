@@ -1,0 +1,7 @@
+name: mbd
+evaluation_name: mbd_raw_smoke
+role: smoke_test
+paths:
+  transactions: /app/data/smoke/mbd_raw/transactions.parquet
+  targets: /app/data/smoke/mbd_raw/targets.parquet
+event_type_col: col_2

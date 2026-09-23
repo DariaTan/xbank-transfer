@@ -5,10 +5,12 @@
 # digests can't.
 FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime@sha256:c8268a92a69bd500f8be0e665b2630ee006dadaf7bfbc24249141b15ff622755
 
+# Long-running inference jobs use tmux inside the container.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         build-essential \
         curl \
+        tmux \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

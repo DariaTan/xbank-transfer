@@ -7,7 +7,7 @@
 # not because they can't share a file -- each infer_*.py script also
 # reads its own architecture params (hidden_size/num_layers/etc, which
 # must match what the checkpoint was trained with) from
-# configs/train/<model>.yaml, not from here.
+# configs/models/<model>.yaml, not from here.
 
 inference:
   n_clients: null   # cap for a quick debug run; null uses all clients

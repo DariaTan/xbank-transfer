@@ -6,6 +6,11 @@ wandb/
 __pycache__/
 *.pyc
 .venv/
+.venv*/
+/environments/passwd
+/environments/group
+/environments/Dockerfile.bak
+/environments/drun.sh.bak2
 /article/
 /dialog.md
 *.pdf

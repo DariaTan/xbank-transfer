@@ -17,6 +17,7 @@
 # CoLES/MLM/NEP, a real limitation to note in the paper for the TPP family
 # when pretraining directly on xbank.
 name: xbank
+evaluation_name: xbank
 
 paths:
   transactions: /app/data/xbank_data/trans_any_pos_anonym_encoded.parquet
