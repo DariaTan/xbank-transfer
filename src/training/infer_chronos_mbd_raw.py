@@ -1,4 +1,4 @@
-"""Resumable, two-GPU Chronos-2 inference on MBD raw transactions.
+"""Resumable, two-GPU Chronos-2 inference on raw MBD or matched xbank.
 
 Prepare scans the raw adapted parquet once and aggregates every labeled
 client's transactions by calendar day. Workers read disjoint cached shards,
@@ -22,8 +22,9 @@ import torch
 import yaml
 
 from data.schema import CLIENT_ID_COL, EVENT_TIME_COL, TARGETS_CLIENT_ID_COL, TARGETS_DATE_COL
+from cross_schema.apply_mapping import FrozenSchemaMapping
 from training.embedding_io import atomic_parquet, validate_embedding_frame
-from training.paths import data_root, embedding_dir, evaluation_name, load_data_config
+from training.paths import data_root, embedding_dir, evaluation_name, load_data_config, resolve_data_path
 
 
 MODEL = "chronos2"
@@ -39,8 +40,9 @@ def _dates(targets_path: Path) -> list[str]:
     return sorted(dates.astype(str).unique().tolist())
 
 
-def _manifest(transactions: Path, targets: Path, dates: list[str], months: int, shards: int) -> dict:
-    return {
+def _manifest(transactions: Path, targets: Path, dates: list[str], months: int, shards: int,
+              value_col: str = "col_11", mapping_sha256: str | None = None) -> dict:
+    manifest = {
         "format_version": FORMAT_VERSION,
         "transactions": str(transactions),
         "transactions_size": transactions.stat().st_size,
@@ -51,9 +53,12 @@ def _manifest(transactions: Path, targets: Path, dates: list[str], months: int, 
         "target_dates": dates,
         "history_window_months": months,
         "n_shards": shards,
-        "value_col": "col_11",
+        "value_col": value_col,
         "day_cutoff": "strictly_before_target_date",
     }
+    if mapping_sha256 is not None:
+        manifest["schema_mapping_sha256"] = mapping_sha256
+    return manifest
 
 
 def _check_manifest(path: Path, expected: dict) -> None:
@@ -106,7 +111,7 @@ def prepare(cache_dir: Path, out_dir: Path, manifest: dict) -> None:
                     SELECT CAST(hash(tx.{CLIENT_ID_COL}) % {manifest['n_shards']} AS INTEGER) AS shard,
                            tx.{CLIENT_ID_COL} AS {CLIENT_ID_COL},
                            CAST(tx.{EVENT_TIME_COL} AS DATE) AS day,
-                           SUM(CAST(tx.col_11 AS DOUBLE)) AS value
+                           SUM(CAST(tx.{manifest['value_col']} AS DOUBLE)) AS value
                     FROM read_parquet('{_sql_path(Path(manifest['transactions']))}') AS tx
                     SEMI JOIN target_clients AS tc USING ({CLIENT_ID_COL})
                     WHERE tx.{EVENT_TIME_COL} > DATE '{first_day.date()}'
@@ -284,16 +289,30 @@ def main() -> None:
         parser.error("n-shards and workers must be positive; worker-index must be in range")
 
     data_cfg = load_data_config(args.data_config)
-    if evaluation_name(data_cfg) not in {"mbd_raw", "mbd_raw_smoke"}:
-        parser.error("Chronos raw runner requires an MBD-raw data config")
+    eval_name = evaluation_name(data_cfg)
+    if eval_name not in {"mbd_raw", "mbd_raw_smoke", "xbank"}:
+        parser.error("Chronos raw runner requires MBD-raw or xbank data")
     with open(args.downstream_config) as file:
         inf = yaml.safe_load(file)["inference"]
     transactions = Path(data_cfg["paths"]["transactions"])
     targets = Path(data_cfg["paths"]["targets"])
     dates = _dates(targets)
-    manifest = _manifest(transactions, targets, dates, inf["history_window_months"], args.n_shards)
-    out_dir = embedding_dir(inf["embeds_dir"], evaluation_name(data_cfg), "mbd", MODEL)
-    cache_dir = data_root() / "chronos2_daily_cache" / evaluation_name(data_cfg)
+    value_col = "col_11"
+    mapping_sha256 = None
+    if eval_name == "xbank":
+        mapping_path = data_cfg.get("schema_mapping")
+        if not mapping_path:
+            parser.error("xbank Chronos requires schema_mapping from the cross-schema builder")
+        mapping = FrozenSchemaMapping(resolve_data_path(mapping_path))
+        matched_amount = [source for source, field in mapping.mapping.items() if field == "amount"]
+        if len(matched_amount) != 1:
+            parser.error("xbank Chronos requires exactly one field matched to MBD amount")
+        value_col = matched_amount[0]
+        mapping_sha256 = mapping.sha256
+    manifest = _manifest(transactions, targets, dates, inf["history_window_months"], args.n_shards,
+                         value_col=value_col, mapping_sha256=mapping_sha256)
+    out_dir = embedding_dir(inf["embeds_dir"], eval_name, "mbd", MODEL)
+    cache_dir = data_root() / "chronos2_daily_cache" / eval_name
 
     if args.phase == "prepare":
         prepare(cache_dir, out_dir, manifest)

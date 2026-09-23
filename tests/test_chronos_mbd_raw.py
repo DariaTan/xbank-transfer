@@ -12,6 +12,26 @@ from training.infer_chronos_mbd_raw import _manifest, _series_for_date, finalize
 
 
 class ChronosRawTests(unittest.TestCase):
+    def test_xbank_manifest_uses_matched_amount_column(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            transactions = root / "transactions.parquet"
+            targets = root / "targets.parquet"
+            pd.DataFrame({
+                "id": ["a", "a"],
+                "col_1": pd.to_datetime(["2022-12-30", "2022-12-30"]),
+                "col_11": [100.0, 200.0],
+                "col_12": [1.0, 2.0],
+            }).to_parquet(transactions)
+            pd.DataFrame({"id": ["a"], "col_1": ["2023-01-01"]}).to_parquet(targets)
+            manifest = _manifest(transactions, targets, ["2023-01-01"], months=12, shards=1,
+                                 value_col="col_12", mapping_sha256="matching-hash")
+            with patch.dict(os.environ, {"XBANK_DATA_ROOT": str(root)}):
+                prepare(root / "cache", root / "output", manifest)
+            daily = pd.read_parquet(root / "cache" / "shards")
+            self.assertEqual(daily.value.tolist(), [3.0])
+            self.assertEqual(manifest["schema_mapping_sha256"], "matching-hash")
+
     def test_prepare_aggregates_full_days_and_excludes_target_day(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
