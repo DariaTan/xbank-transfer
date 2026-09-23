@@ -26,6 +26,7 @@ import pandas as pd
 import torch
 import yaml
 
+from cross_schema.apply_mapping import FrozenSchemaMapping
 from data.loaders import build_chronos_series, build_cotic_sequences, build_ptls_records, build_thp_sequences
 from data.schema import (
     ALL_FEATURE_COLS,
@@ -38,7 +39,7 @@ from data.schema import (
 from data.splits import load_windowed_transactions_for_dates, unpack_window_id
 from training.common import load_preprocessor
 from training.embedding_io import atomic_parquet, validate_embedding_file, validate_embedding_frame
-from training.paths import checkpoint_dir, embedding_dir, evaluation_name, load_data_config
+from training.paths import checkpoint_dir, embedding_dir, evaluation_name, load_data_config, resolve_data_path
 
 
 MODEL_CHOICES = ["coles", "cotic", "nep", "mlm", "thp", "chronos2"]
@@ -257,6 +258,7 @@ def _run_date(
     inf: Dict,
     columns: List[str],
     embed: Callable[[pd.DataFrame], Tuple[np.ndarray, List[str]]],
+    include_target_date_transactions: bool = True,
 ) -> None:
     out_path = out_dir / f"{target_date}.parquet"
     if out_path.exists():
@@ -282,6 +284,7 @@ def _run_date(
             inf["max_seq_len"],
             client_ids=ids,
             columns=columns,
+            include_cutoff=include_target_date_transactions,
         )
         if windowed.empty:
             empty_marker.touch()
@@ -325,6 +328,8 @@ def main() -> None:
     parser.add_argument("--downstream-config", default="/app/configs/models/downstream_mbd.yaml")
     parser.add_argument("--model-config", default=None, help="default /app/configs/models/<model>.yaml")
     parser.add_argument("--checkpoint-source", default="mbd")
+    parser.add_argument("--mapping-file", default=None,
+                        help="frozen_mapping.json from cross_schema.column_profiles")
     cli = parser.parse_args()
 
     data_cfg = load_data_config(cli.data_config)
@@ -343,6 +348,11 @@ def main() -> None:
             model_cfg = yaml.safe_load(f)
 
     eval_name = evaluation_name(data_cfg)
+    mapping_path = cli.mapping_file or data_cfg.get("schema_mapping")
+    mapping = FrozenSchemaMapping(resolve_data_path(mapping_path)) if mapping_path else None
+    if eval_name == "xbank" and (cli.checkpoint_source == "mbd" or cli.model == "chronos2") and mapping is None:
+        raise ValueError("xbank inference with an MBD checkpoint requires frozen schema_mapping")
+    include_target_date_transactions = data_cfg.get("include_target_date_transactions", True)
     out_dir = embedding_dir(inf["embeds_dir"], eval_name, cli.checkpoint_source, cli.model)
     client_ids, target_dates = _target_population(targets_path, inf.get("n_clients"), inf.get("seed", 0))
     chunk_size = (
@@ -366,6 +376,11 @@ def main() -> None:
         "batch_size": inf["batch_size"],
         "model_config": model_cfg,
     }
+    if mapping is not None:
+        manifest["schema_mapping_sha256"] = mapping.sha256
+        manifest["schema_mapping_path"] = str(mapping.path)
+    if not include_target_date_transactions:
+        manifest["include_target_date_transactions"] = False
     _write_or_check_manifest(out_dir, manifest)
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -374,14 +389,21 @@ def main() -> None:
         f"clients={len(client_ids)} dates={len(target_dates)} chunks/date={len(client_chunks)} device={device}",
         flush=True,
     )
-    embed = _load_embedder(cli.model, model_cfg, inf, data_cfg, device, cli.checkpoint_source)
-    columns = _model_columns(
-        cli.model,
-        data_cfg.get("event_type_col", "col_2"),
-        inf["chronos2_value_col"],
-    )
+    raw_embed = _load_embedder(cli.model, model_cfg, inf, data_cfg, device, cli.checkpoint_source)
+    if mapping is not None:
+        def embed(windowed: pd.DataFrame) -> Tuple[np.ndarray, List[str]]:
+            return raw_embed(mapping.transform(windowed, cli.model))
+        columns = mapping.source_columns(cli.model)
+    else:
+        embed = raw_embed
+        columns = _model_columns(
+            cli.model,
+            data_cfg.get("event_type_col", "col_2"),
+            inf["chronos2_value_col"],
+        )
     for target_date in target_dates:
-        _run_date(target_date, client_chunks, transactions_path, out_dir, inf, columns, embed)
+        _run_date(target_date, client_chunks, transactions_path, out_dir, inf, columns, embed,
+                  include_target_date_transactions=include_target_date_transactions)
     print(f"Done: {out_dir}", flush=True)
 
 

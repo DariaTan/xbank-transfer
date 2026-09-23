@@ -35,6 +35,10 @@ inference:
 # never evaluated on a period it could have trained on -- the script
 # doesn't enforce this, so keep it in mind when changing these bounds.
 probe:
+  # xbank col_2 TARGET has contradictory 0/1 labels for the same (id, month)
+  # in 331,280 pairs. This is unrelated to transaction feature col_2.
+  # Keep all clients and evaluate only the three unambiguous targets.
+  target_cols: [col_3, col_4, col_5]
   train:
     start: "2023-01"
     end: "2023-12"

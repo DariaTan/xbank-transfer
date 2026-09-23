@@ -57,10 +57,10 @@ from data.schema import CATEGORY_COLS, EVENT_TIME_COL, NUMERIC_COLS
 # variables
 # --------------------------------------------------------------------------
 
-XBANK_TRX_DEFAULT = '/home/stsix/xbank-transfer/data/xbank_data/trans_any_pos_anonym_encoded.parquet'
-MBD_ROOT_DEFAULT = '/home/stsix/xbank-transfer/data/mbd'
-MBD_ADAPTED_DAILY_DEFAULT = '/home/stsix/xbank-transfer/data/mbd_daily/transactions_adapted_daily.parquet'
-OUT_DIR_DEFAULT = '/home/stsix/xbank-transfer/data/profiles'
+XBANK_TRX_DEFAULT = '/app/data/xbank_data/trans_any_pos_anonym_encoded.parquet'
+MBD_ROOT_DEFAULT = '/app/data/mbd_data/raw'
+MBD_ADAPTED_DAILY_DEFAULT = '/app/data/mbd_data/daily_adapted/transactions.parquet'
+OUT_DIR_DEFAULT = '/app/data/profiles'
 
 MBD_TIME_FIELD = "event_time"
 MBD_NUMERIC_FIELDS = ("amount",)

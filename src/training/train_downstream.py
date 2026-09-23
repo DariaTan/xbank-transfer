@@ -42,7 +42,8 @@ from sklearn.model_selection import GroupShuffleSplit
 
 from data.schema import TARGET_COLS, TARGETS_CLIENT_ID_COL, TARGETS_DATE_COL
 from training.common import EarlyStopper
-from training.paths import load_data_config
+from training.paths import downstream_dir, embedding_dir, evaluation_name, load_data_config
+from training.target_io import load_targets
 
 
 def load_embeddings(embeds_dir: Path, model: str) -> pd.DataFrame:
@@ -50,12 +51,6 @@ def load_embeddings(embeds_dir: Path, model: str) -> pd.DataFrame:
     if not paths:
         raise FileNotFoundError(f"no embedding files under {embeds_dir / model}")
     return pd.concat([pd.read_parquet(p) for p in paths], ignore_index=True)
-
-
-def load_targets(targets_path: str) -> pd.DataFrame:
-    targets = pd.read_parquet(targets_path)
-    targets[TARGETS_DATE_COL] = targets[TARGETS_DATE_COL].astype(str)
-    return targets
 
 
 def month_range(start: str, end: str) -> List[str]:
@@ -82,6 +77,7 @@ def load_config(config_path: str) -> Dict:
     return {
         "train": month_range(cfg["train"]["start"], cfg["train"]["end"]),
         "test": month_range(cfg["test"]["start"], cfg["test"]["end"]),
+        "target_cols": cfg.get("target_cols", TARGET_COLS),
         "max_neg_ratio": cfg.get("max_neg_ratio"),
         "embeds_dir": cfg.get("embeds_dir", "/app/data/embeds"),
         "checkpoint_dir": cfg.get("checkpoint_dir"),
@@ -282,6 +278,7 @@ def main():
     parser.add_argument("--model", required=True, choices=["coles", "nep", "mlm", "thp", "chronos2"])
     parser.add_argument("--config", type=str, default="/app/configs/models/downstream.yaml")
     parser.add_argument("--data-config", type=str, default="/app/configs/data/xbank.yaml")
+    parser.add_argument("--checkpoint-source", default="mbd")
     parser.add_argument(
         "--eval-only",
         action="store_true",
@@ -296,6 +293,7 @@ def main():
 
     cfg = load_config(cli.config)
     data_cfg = load_data_config(cli.data_config)
+    eval_name = evaluation_name(data_cfg)
     mlp_args = SimpleNamespace(
         hidden=cfg["hidden"],
         lr=cfg["lr"],
@@ -304,7 +302,12 @@ def main():
         batch_size=cfg["batch_size"],
     )
 
-    ckpt_dir = Path(cfg["checkpoint_dir"] or f"/app/data/downstream/{cli.model}")
+    ckpt_dir = downstream_dir(
+        cfg["checkpoint_dir"] or "/app/data/downstream",
+        eval_name,
+        cli.checkpoint_source,
+        cli.model,
+    )
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -316,12 +319,13 @@ def main():
     )
 
     print(f"Loading {cli.model} embeddings ...", flush=True)
-    embeds = load_embeddings(Path(cfg["embeds_dir"]), cli.model)
+    embeds_path = embedding_dir(cfg["embeds_dir"], eval_name, cli.checkpoint_source, cli.model)
+    embeds = load_embeddings(embeds_path.parent, cli.model)
     print(f"  {len(embeds)} rows across {embeds['date'].nunique()} dates", flush=True)
 
     print("Loading targets ...", flush=True)
     targets_path = data_cfg["paths"]["targets"]
-    targets = load_targets(targets_path)
+    targets = load_targets(targets_path, cfg["target_cols"])
     check_required_months(targets, cfg["train"] + cfg["test"], targets_path)
 
     joined = targets.merge(
@@ -352,7 +356,7 @@ def main():
     X_test = test[cols].to_numpy(dtype=np.float32)
 
     results = []
-    for target in TARGET_COLS:
+    for target in cfg["target_cols"]:
         y_train = train_df[target].to_numpy()
         y_val = val_df[target].to_numpy()
         y_test = test[target].to_numpy()

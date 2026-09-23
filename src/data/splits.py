@@ -69,6 +69,7 @@ def load_windowed_transactions_for_dates(
     max_seq_len: int,
     client_ids: Optional[List[str]] = None,
     columns: Optional[List[str]] = None,
+    include_cutoff: bool = True,
 ) -> pd.DataFrame:
     """Windowed/synthetic-id-stamped transactions for a fixed calendar-date
     grid applied to EVERY client (e.g. "the 1st of each month") -- the
@@ -81,6 +82,9 @@ def load_windowed_transactions_for_dates(
     projects inside DuckDB before materializing pandas data; it must include
     the client-id and event-time columns. This is especially important for
     THP/COTIC, which only need one event-type field from the wide table.
+    `include_cutoff=False` excludes transactions on the target date. Xbank
+    has transactions on its first-of-month target dates, so that setting
+    avoids leaking same-day information into evaluation embeddings.
     """
     con = duckdb.connect()
 
@@ -103,6 +107,7 @@ def load_windowed_transactions_for_dates(
         projected_cols = [c for c in columns if c != CLIENT_ID_COL]
         projected = ", ".join(f"tx.{c}" for c in projected_cols)
 
+    cutoff_operator = "<=" if include_cutoff else "<"
     windowed_query = f"""
         SELECT
             {projected},
@@ -110,7 +115,7 @@ def load_windowed_transactions_for_dates(
                 AS {CLIENT_ID_COL}
         FROM read_parquet(?) AS tx
         CROSS JOIN (VALUES {date_values}) AS d(target_date)
-        WHERE tx.{EVENT_TIME_COL} <= d.target_date
+        WHERE tx.{EVENT_TIME_COL} {cutoff_operator} d.target_date
           AND tx.{EVENT_TIME_COL} > d.target_date - INTERVAL ({history_window_months}) MONTH
           {client_filter}
     """
