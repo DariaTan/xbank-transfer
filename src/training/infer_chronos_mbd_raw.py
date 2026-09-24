@@ -290,7 +290,7 @@ def main() -> None:
 
     data_cfg = load_data_config(args.data_config)
     eval_name = evaluation_name(data_cfg)
-    if eval_name not in {"mbd_raw", "mbd_raw_smoke", "xbank"}:
+    if eval_name not in {"mbd_raw", "mbd_raw_smoke"} and data_cfg.get("name") != "xbank":
         parser.error("Chronos raw runner requires MBD-raw or xbank data")
     with open(args.downstream_config) as file:
         inf = yaml.safe_load(file)["inference"]
@@ -299,15 +299,14 @@ def main() -> None:
     dates = _dates(targets)
     value_col = "col_11"
     mapping_sha256 = None
-    if eval_name == "xbank":
+    if data_cfg.get("name") == "xbank":
         mapping_path = data_cfg.get("schema_mapping")
         if not mapping_path:
             parser.error("xbank Chronos requires schema_mapping from the cross-schema builder")
         mapping = FrozenSchemaMapping(resolve_data_path(mapping_path))
-        matched_amount = [source for source, field in mapping.mapping.items() if field == "amount"]
-        if len(matched_amount) != 1:
+        value_col = mapping.field_to_source.get("amount")
+        if value_col is None:
             parser.error("xbank Chronos requires exactly one field matched to MBD amount")
-        value_col = matched_amount[0]
         mapping_sha256 = mapping.sha256
     manifest = _manifest(transactions, targets, dates, inf["history_window_months"], args.n_shards,
                          value_col=value_col, mapping_sha256=mapping_sha256)

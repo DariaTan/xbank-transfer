@@ -1,0 +1,10 @@
+# Same xbank transactions, targets, windows and frozen MBD checkpoints as
+# xbank.yaml. Only the cross-schema mapping and output namespace differ.
+name: xbank
+evaluation_name: xbank_fgw_v2
+paths:
+  transactions: /app/data/xbank_data/trans_any_pos_anonym_encoded.parquet
+  targets: /app/data/xbank_data/targets_anonym_encoded.parquet
+schema_mapping: /app/configs/mappings/xbank_to_mbd_raw_fgw_v2.json
+include_target_date_transactions: false
+event_type_col: col_2

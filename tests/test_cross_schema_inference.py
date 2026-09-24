@@ -44,6 +44,39 @@ class CrossSchemaInferenceTests(unittest.TestCase):
             self.assertEqual(mapping.source_columns("chronos2"), ["id", "col_1", "col_12"])
             self.assertEqual(mapping.transform(window, "chronos2").at[0, "col_11"], 0.75)
 
+    def test_semirelaxed_fgw_mapping_reuses_xbank_categories(self):
+        root = Path(__file__).resolve().parents[1]
+        mapping = FrozenSchemaMapping(root / "configs/mappings/xbank_to_mbd_raw_fgw_v2.json")
+        previous = FrozenSchemaMapping(root / "configs/mappings/xbank_to_mbd_raw.json")
+        window = pd.DataFrame({
+            "id": ["client::2023-01-01"],
+            "col_1": pd.to_datetime(["2022-12-31"]),
+            "col_2": [7.0], "col_3": [8.0], "col_6": [3.0],
+            "col_10": [4.0], "col_12": [0.25],
+        })
+        self.assertEqual(mapping.source_columns("cotic"), ["id", "col_1", "col_2"])
+        self.assertEqual(mapping.source_columns("coles"),
+                         ["id", "col_1", "col_12", "col_2", "col_6", "col_3", "col_10"])
+        aligned = mapping.transform(window, "coles")
+        self.assertEqual([aligned.at[0, col] for col in ("col_2", "col_3", "col_7", "col_8")],
+                         [7, 7, 7, 7])
+        self.assertEqual([aligned.at[0, col] for col in ("col_5", "col_6")], [8, 8])
+        self.assertEqual([aligned.at[0, col] for col in ("col_10", "col_14")], [4, 4])
+        self.assertEqual([aligned.at[0, col] for col in ("col_9", "col_13")], [0, 0])
+        self.assertEqual(aligned.at[0, "col_11"], 0.25)
+        self.assertEqual(mapping.field_to_source["amount"], previous.field_to_source["amount"])
+        self.assertEqual(mapping.field_to_source["event_time"], previous.field_to_source["event_time"])
+
+    def test_semirelaxed_reverse_mapping_must_agree(self):
+        root = Path(__file__).resolve().parents[1]
+        document = json.loads((root / "configs/mappings/xbank_to_mbd_raw_fgw_v2.json").read_text())
+        document["xbank_to_mbd"]["col_2"].remove("event_type")
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "broken.json"
+            path.write_text(json.dumps(document))
+            with self.assertRaisesRegex(ValueError, "disagrees"):
+                FrozenSchemaMapping(path)
+
     def test_fractional_category_code_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
             mapping = self._mapping(Path(temp), {

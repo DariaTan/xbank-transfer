@@ -3,15 +3,17 @@
 set -euo pipefail
 
 GPU="${1:?Usage: infer_xbank_queue_worker.sh GPU_ID}"
+DATA_CONFIG="${2:-/app/configs/data/xbank.yaml}"
+EVALUATION_NAME="${3:-xbank}"
 
 run_job() {
     local model="$1"
-    local log="/app/data/logs/infer_xbank_mbd_source_${model}.log"
+    local log="/app/data/logs/infer_${EVALUATION_NAME}_mbd_source_${model}.log"
 
     echo "=== START xbank ${model} $(date --iso-8601=seconds) GPU=${GPU} ===" | tee -a "${log}"
     if ! CUDA_VISIBLE_DEVICES="${GPU}" python -u /app/src/training/infer_mbd.py \
         --model "${model}" \
-        --data-config /app/configs/data/xbank.yaml \
+        --data-config "${DATA_CONFIG}" \
         --downstream-config /app/configs/models/downstream.yaml \
         --checkpoint-source mbd 2>&1 | tee -a "${log}"; then
         echo "=== FAILED xbank ${model} $(date --iso-8601=seconds) ===" | tee -a "${log}"

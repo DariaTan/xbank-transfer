@@ -350,7 +350,7 @@ def main() -> None:
     eval_name = evaluation_name(data_cfg)
     mapping_path = cli.mapping_file or data_cfg.get("schema_mapping")
     mapping = FrozenSchemaMapping(resolve_data_path(mapping_path)) if mapping_path else None
-    if eval_name == "xbank" and (cli.checkpoint_source == "mbd" or cli.model == "chronos2") and mapping is None:
+    if data_cfg.get("name") == "xbank" and (cli.checkpoint_source == "mbd" or cli.model == "chronos2") and mapping is None:
         raise ValueError("xbank inference with an MBD checkpoint requires frozen schema_mapping")
     include_target_date_transactions = data_cfg.get("include_target_date_transactions", True)
     out_dir = embedding_dir(inf["embeds_dir"], eval_name, cli.checkpoint_source, cli.model)
