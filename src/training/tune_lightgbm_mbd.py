@@ -1,8 +1,9 @@
 """Leakage-safe LightGBM tuning on frozen MBD-raw embeddings.
 
-Client-disjoint folds 0-2 train, fold 3 validates hyperparameters and early
-stopping, and fold 4 is read only for the final score. The four product
-targets are independent binary tasks, not a single multiclass label.
+For each held-out test fold, the preceding fold validates hyperparameters and
+early stopping; the other three folds train the candidates. The selected model
+is refit on all four development folds before the test fold is read. The four
+product targets are independent binary tasks, not a single multiclass label.
 """
 from __future__ import annotations
 
@@ -20,9 +21,15 @@ from data.schema import TARGET_COLS, TARGETS_CLIENT_ID_COL, TARGETS_DATE_COL
 from training.paths import downstream_dir, embedding_dir, evaluation_name, load_data_config
 
 
-TRAIN_FOLDS = (0, 1, 2)
-VAL_FOLD = 3
-TEST_FOLD = 4
+ALL_FOLDS = tuple(range(5))
+
+
+def folds_for_test(test_fold: int) -> tuple[tuple[int, ...], int]:
+    if test_fold not in ALL_FOLDS:
+        raise ValueError(f"test fold must be one of {ALL_FOLDS}, got {test_fold}")
+    val_fold = (test_fold - 1) % len(ALL_FOLDS)
+    train_folds = tuple(fold for fold in ALL_FOLDS if fold not in (val_fold, test_fold))
+    return train_folds, val_fold
 
 
 def _atomic_json(path: Path, data: dict) -> None:
@@ -101,21 +108,28 @@ def _metrics(labels: np.ndarray, probabilities: np.ndarray) -> dict:
 
 
 def run(model: str, data_config: str, output_root: str, seed: int,
-        trials: int, threads: int, tune_client_cap: int, max_rounds: int) -> None:
+        trials: int, threads: int, tune_client_cap: int, max_rounds: int,
+        test_fold: int = 4) -> None:
     import lightgbm as lgb
 
     if tune_client_cap < 1 or max_rounds < 1:
         raise ValueError("tune-client-cap and max-rounds must be positive")
+    train_folds, val_fold = folds_for_test(test_fold)
     data_cfg = load_data_config(data_config)
     if evaluation_name(data_cfg) != "mbd_raw":
         raise ValueError("HPO is restricted to MBD-raw embeddings and targets")
     targets_path = Path(data_cfg["paths"]["targets"])
     embeds_dir = embedding_dir("/app/data/embeds", "mbd_raw", "mbd", model)
-    output = downstream_dir(output_root, "mbd_raw", "mbd", model) / "lightgbm_hpo_holdout"
+    model_output = downstream_dir(output_root, "mbd_raw", "mbd", model)
+    output = (model_output / "lightgbm_hpo_holdout" if test_fold == 4
+              else model_output / "lightgbm_hpo_cv" / f"fold{test_fold}")
     output.mkdir(parents=True, exist_ok=True)
     joined, cols, files = _load_joined(targets_path, embeds_dir)
     manifest = {
-        "protocol": "client-disjoint folds 0-2 train, 3 validation, 4 untouched test",
+        "protocol": ("client-disjoint folds 0-2 train, 3 validation, 4 untouched test"
+                     if test_fold == 4 else
+                     f"client-disjoint folds {train_folds} train, {val_fold} validation, "
+                     f"{test_fold} untouched test"),
         "model": model,
         "targets": TARGET_COLS,
         "target_file": {"path": str(targets_path), "size": targets_path.stat().st_size,
@@ -128,6 +142,9 @@ def run(model: str, data_config: str, output_root: str, seed: int,
         "tune_client_cap": tune_client_cap,
         "max_rounds": max_rounds,
     }
+    if test_fold != 4:
+        manifest.update({"test_fold": test_fold, "val_fold": val_fold,
+                         "train_folds": list(train_folds)})
     manifest_path = output / "run_manifest.json"
     if manifest_path.exists():
         if json.loads(manifest_path.read_text()) != manifest:
@@ -135,9 +152,11 @@ def run(model: str, data_config: str, output_root: str, seed: int,
     else:
         _atomic_json(manifest_path, manifest)
 
-    train = joined[joined.fold.isin(TRAIN_FOLDS)]
-    val = joined[joined.fold == VAL_FOLD]
-    test = joined[joined.fold == TEST_FOLD]
+    if set(joined.fold.unique()) != set(ALL_FOLDS):
+        raise ValueError(f"expected labeled MBD folds {ALL_FOLDS}, got {sorted(joined.fold.unique())}")
+    train = joined[joined.fold.isin(train_folds)]
+    val = joined[joined.fold == val_fold]
+    test = joined[joined.fold == test_fold]
     if min(len(train), len(val), len(test)) == 0:
         raise ValueError("train, validation and test folds must all be present")
     clients = np.sort(train[TARGETS_CLIENT_ID_COL].unique())
@@ -228,9 +247,11 @@ def main() -> None:
     parser.add_argument("--threads", type=int, default=6)
     parser.add_argument("--tune-client-cap", type=int, default=100000)
     parser.add_argument("--max-rounds", type=int, default=600)
+    parser.add_argument("--test-fold", type=int, choices=ALL_FOLDS, default=4,
+                        help="held-out test fold; fold 4 reuses the existing holdout outputs")
     args = parser.parse_args()
     run(args.model, args.data_config, args.output_root, args.seed, args.trials,
-        args.threads, args.tune_client_cap, args.max_rounds)
+        args.threads, args.tune_client_cap, args.max_rounds, args.test_fold)
 
 
 if __name__ == "__main__":
