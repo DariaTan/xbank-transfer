@@ -1,4 +1,4 @@
-"""Leakage-safe LightGBM tuning on frozen MBD-raw embeddings.
+"""Leakage-safe LightGBM tuning on frozen MBD raw or daily embeddings.
 
 For each held-out test fold, the preceding fold validates hyperparameters and
 early stopping; the other three folds train the candidates. The selected model
@@ -116,18 +116,20 @@ def run(model: str, data_config: str, output_root: str, seed: int,
         raise ValueError("tune-client-cap and max-rounds must be positive")
     train_folds, val_fold = folds_for_test(test_fold)
     data_cfg = load_data_config(data_config)
-    if evaluation_name(data_cfg) != "mbd_raw":
-        raise ValueError("HPO is restricted to MBD-raw embeddings and targets")
+    eval_name = evaluation_name(data_cfg)
+    if eval_name not in ("mbd_raw", "mbd_daily"):
+        raise ValueError("HPO requires MBD raw or daily embeddings and targets")
     targets_path = Path(data_cfg["paths"]["targets"])
-    embeds_dir = embedding_dir("/app/data/embeds", "mbd_raw", "mbd", model)
-    model_output = downstream_dir(output_root, "mbd_raw", "mbd", model)
-    output = (model_output / "lightgbm_hpo_holdout" if test_fold == 4
+    embeds_dir = embedding_dir("/app/data/embeds", eval_name, "mbd", model)
+    model_output = downstream_dir(output_root, eval_name, "mbd", model)
+    legacy_holdout = eval_name == "mbd_raw" and test_fold == 4
+    output = (model_output / "lightgbm_hpo_holdout" if legacy_holdout
               else model_output / "lightgbm_hpo_cv" / f"fold{test_fold}")
     output.mkdir(parents=True, exist_ok=True)
     joined, cols, files = _load_joined(targets_path, embeds_dir)
     manifest = {
         "protocol": ("client-disjoint folds 0-2 train, 3 validation, 4 untouched test"
-                     if test_fold == 4 else
+                     if legacy_holdout else
                      f"client-disjoint folds {train_folds} train, {val_fold} validation, "
                      f"{test_fold} untouched test"),
         "model": model,
@@ -142,7 +144,7 @@ def run(model: str, data_config: str, output_root: str, seed: int,
         "tune_client_cap": tune_client_cap,
         "max_rounds": max_rounds,
     }
-    if test_fold != 4:
+    if not legacy_holdout:
         manifest.update({"test_fold": test_fold, "val_fold": val_fold,
                          "train_folds": list(train_folds)})
     manifest_path = output / "run_manifest.json"
@@ -248,7 +250,7 @@ def main() -> None:
     parser.add_argument("--tune-client-cap", type=int, default=100000)
     parser.add_argument("--max-rounds", type=int, default=600)
     parser.add_argument("--test-fold", type=int, choices=ALL_FOLDS, default=4,
-                        help="held-out test fold; fold 4 reuses the existing holdout outputs")
+                        help="held-out test fold; raw fold 4 reuses the existing holdout outputs")
     args = parser.parse_args()
     run(args.model, args.data_config, args.output_root, args.seed, args.trials,
         args.threads, args.tune_client_cap, args.max_rounds, args.test_fold)

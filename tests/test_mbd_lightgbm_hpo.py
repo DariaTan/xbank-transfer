@@ -32,31 +32,33 @@ class MbdLightgbmHpoTests(unittest.TestCase):
     def test_five_fold_summary_uses_existing_fold_four(self):
         with tempfile.TemporaryDirectory() as temp:
             for fold in range(5):
-                directory = fold_output(temp, "coles", fold)
-                directory.mkdir(parents=True)
-                manifest = {"model": "coles", "target_file": {"path": "targets"},
-                            "embedding_files": [{"path": "embeddings"}], "seed": 42,
-                            "trials": 4, "threads": 6, "tune_client_cap": 50000,
-                            "max_rounds": 400}
-                if fold != 4:
-                    train_folds, val_fold = folds_for_test(fold)
-                    manifest.update(test_fold=fold, val_fold=val_fold,
-                                    train_folds=train_folds)
-                (directory / "run_manifest.json").write_text(json.dumps(manifest))
-                for target in ("col_2", "col_3", "col_4", "col_5"):
-                    (directory / f"{target}_model.txt").write_text("model")
-                    (directory / f"{target}_metrics.json").write_text(json.dumps({
-                        "target": target, "final_rounds": 10,
-                        "test_metrics": {"n_rows": 8, "prevalence": 0.125,
-                                         "pr_auc": 0.2 + fold * 0.01,
-                                         "roc_auc": 0.6 + fold * 0.01},
-                    }))
-            rows = collect(temp, models=("coles",))
-            aggregate, macro = summarize(rows)
-            self.assertEqual(len(rows), 20)
-            self.assertTrue((aggregate.n_folds == 5).all())
-            self.assertTrue(np.allclose(aggregate.roc_auc_mean, 0.62))
-            self.assertAlmostEqual(macro.mean_roc_auc_across_targets.iloc[0], 0.62)
+                for eval_name in ("mbd_raw", "mbd_daily"):
+                    directory = fold_output(temp, "coles", fold, eval_name)
+                    directory.mkdir(parents=True)
+                    manifest = {"model": "coles", "target_file": {"path": "targets"},
+                                "embedding_files": [{"path": "embeddings"}], "seed": 42,
+                                "trials": 4, "threads": 6, "tune_client_cap": 50000,
+                                "max_rounds": 400}
+                    if fold != 4 or eval_name == "mbd_daily":
+                        train_folds, val_fold = folds_for_test(fold)
+                        manifest.update(test_fold=fold, val_fold=val_fold,
+                                        train_folds=train_folds)
+                    (directory / "run_manifest.json").write_text(json.dumps(manifest))
+                    for target in ("col_2", "col_3", "col_4", "col_5"):
+                        (directory / f"{target}_model.txt").write_text("model")
+                        (directory / f"{target}_metrics.json").write_text(json.dumps({
+                            "target": target, "final_rounds": 10,
+                            "test_metrics": {"n_rows": 8, "prevalence": 0.125,
+                                             "pr_auc": 0.2 + fold * 0.01,
+                                             "roc_auc": 0.6 + fold * 0.01},
+                        }))
+            for eval_name in ("mbd_raw", "mbd_daily"):
+                rows = collect(temp, models=("coles",), eval_name=eval_name)
+                aggregate, macro = summarize(rows)
+                self.assertEqual(len(rows), 20)
+                self.assertTrue((aggregate.n_folds == 5).all())
+                self.assertTrue(np.allclose(aggregate.roc_auc_mean, 0.62))
+                self.assertAlmostEqual(macro.mean_roc_auc_across_targets.iloc[0], 0.62)
 
     def test_end_to_end_keeps_fold_four_for_final_test(self):
         try:
@@ -103,6 +105,21 @@ class MbdLightgbmHpoTests(unittest.TestCase):
                 score = json.loads((fold_zero / f"{target}_metrics.json").read_text())
                 self.assertEqual(score["test_metrics"]["n_rows"], 8)
                 self.assertTrue(np.isfinite(score["test_metrics"]["roc_auc"]))
+
+            daily_embeds = root / "embeds" / "mbd_daily" / "mbd_source" / "coles"
+            daily_embeds.mkdir(parents=True)
+            pd.DataFrame(embeddings).to_parquet(daily_embeds / "all.parquet", index=False)
+            daily_cfg = root / "mbd_daily.yaml"
+            daily_cfg.write_text(
+                "evaluation_name: mbd_daily\npaths:\n"
+                "  targets: /app/data/mbd_data/raw_adapted/targets.parquet\n"
+            )
+            run("coles", str(daily_cfg), "/app/data/downstream", seed=42, trials=1,
+                threads=1, tune_client_cap=10, max_rounds=10, test_fold=4)
+            daily_fold_four = root / "downstream/mbd_daily/mbd_source/coles/lightgbm_hpo_cv/fold4"
+            manifest = json.loads((daily_fold_four / "run_manifest.json").read_text())
+            self.assertEqual(manifest["test_fold"], 4)
+            self.assertTrue((daily_fold_four / "col_2_metrics.json").is_file())
 
 
 if __name__ == "__main__":

@@ -1,8 +1,9 @@
-"""Aggregate the five held-out MBD-raw LightGBM evaluations.
+"""Aggregate the five held-out MBD raw or daily LightGBM evaluations.
 
-Fold 4 is the original holdout run; folds 0-3 are written by
-``tune_lightgbm_mbd.py --test-fold``. All runs must use the same frozen
-embeddings and HPO settings before a five-fold result is published.
+For MBD raw, fold 4 is the original holdout run and folds 0-3 are written by
+``tune_lightgbm_mbd.py --test-fold``. MBD daily writes all five folds anew.
+All runs must use the same frozen embeddings and HPO settings before a
+five-fold result is published.
 """
 from __future__ import annotations
 
@@ -24,19 +25,23 @@ MATCHED_SETTINGS = ("target_file", "embedding_files", "seed", "trials",
                     "threads", "tune_client_cap", "max_rounds")
 
 
-def fold_output(output_root: str | Path, model: str, test_fold: int) -> Path:
-    model_dir = downstream_dir(output_root, "mbd_raw", "mbd", model)
-    if test_fold == 4:
+def fold_output(output_root: str | Path, model: str, test_fold: int,
+                eval_name: str = "mbd_raw") -> Path:
+    if eval_name not in ("mbd_raw", "mbd_daily"):
+        raise ValueError(f"unsupported MBD evaluation: {eval_name}")
+    model_dir = downstream_dir(output_root, eval_name, "mbd", model)
+    if eval_name == "mbd_raw" and test_fold == 4:
         return model_dir / "lightgbm_hpo_holdout"
     return model_dir / "lightgbm_hpo_cv" / f"fold{test_fold}"
 
 
-def collect(output_root: str | Path, models: tuple[str, ...] = MODELS) -> pd.DataFrame:
+def collect(output_root: str | Path, models: tuple[str, ...] = MODELS,
+            eval_name: str = "mbd_raw") -> pd.DataFrame:
     records = []
     for model in models:
         reference = None
         for test_fold in ALL_FOLDS:
-            directory = fold_output(output_root, model, test_fold)
+            directory = fold_output(output_root, model, test_fold, eval_name)
             manifest = json.loads((directory / "run_manifest.json").read_text())
             if reference is None:
                 reference = {key: manifest[key] for key in MATCHED_SETTINGS}
@@ -44,7 +49,7 @@ def collect(output_root: str | Path, models: tuple[str, ...] = MODELS) -> pd.Dat
                 raise ValueError(f"{model} fold {test_fold}: source or HPO settings differ")
             if manifest["model"] != model:
                 raise ValueError(f"{directory}: wrong model in manifest")
-            if test_fold != 4:
+            if eval_name != "mbd_raw" or test_fold != 4:
                 train_folds, val_fold = folds_for_test(test_fold)
                 if (manifest.get("test_fold") != test_fold or
                     manifest.get("val_fold") != val_fold or
@@ -98,10 +103,12 @@ def _atomic_csv(frame: pd.DataFrame, path: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-root", default="/app/data/downstream")
+    parser.add_argument("--evaluation-name", choices=("mbd_raw", "mbd_daily"), default="mbd_raw")
     args = parser.parse_args()
-    rows = collect(args.output_root)
+    rows = collect(args.output_root, eval_name=args.evaluation_name)
     aggregate, macro = summarize(rows)
-    output = resolve_data_path(args.output_root) / "mbd_raw" / "mbd_source" / "lightgbm_hpo_cv_summary"
+    output = (resolve_data_path(args.output_root) / args.evaluation_name /
+              "mbd_source" / "lightgbm_hpo_cv_summary")
     output.mkdir(parents=True, exist_ok=True)
     _atomic_csv(rows, output / "results_all_folds.csv")
     _atomic_csv(aggregate, output / "results_aggregated.csv")
