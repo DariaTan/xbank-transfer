@@ -1,21 +1,24 @@
 """Dictionary-free cross-schema alignment (paper Sec. 5): column passports,
-similarity matching, the MBD testbed, and the frozen-mapping artifact.
+semi-relaxed FGW matching, the MBD testbed, and the frozen-mapping artifact.
+
+Current matcher formulas and validation protocol: see FGW.md; dataset rebuilding: see REBUILD.md.
+The example output below is historical (passport-v1), not an FGW result.
 
 Targets are out of scope by design: only the transaction tables' FEATURE
 columns are ever profiled, matched, or permuted. Target files are never
 opened -- labels stay the untouched evaluation axis.
 
 
-ВСЁ сразу: 3 тестбеда + профили + матчинг xbank→mbd + якоря + заморозка
+ВСЁ сразу: 3 тестбеда + профили + матчинг xbank→mbd + заморозка
 TODO: выполнить это до инфреенса
-PYTHONPATH=src python -m cross_schema.column_profiles --sample-rows 2000000 --testbed-variant all
+PYTHONPATH=src python -m cross_schema.column_profiles_vFGW --sample-rows 2000000 --structure-rows 200000 --testbed-variant all --out-dir data/profiles_vFGW
 
 
 ПООЧЕРЁДНО:
 1) тестбед folds: проверка механики
 
-PYTHONPATH=src python -m cross_schema.column_profiles --testbed-only --sample-rows 2000000 --testbed-variant folds
-Результат: recovery: 12/12 exact (hungarian) - матчер вслепую восстановил все соответствия MBD↔MBD.
+PYTHONPATH=src python -m cross_schema.column_profiles_vFGW --testbed-only --sample-rows 2000000 --structure-rows 200000 --testbed-variant folds --out-dir data/profiles_vFGW
+Результат старого запуска passport-v1: recovery: 12/12 exact (hungarian) - матчер вслепую восстановил все соответствия MBD↔MBD.
 
 
 2) агрегация дневной таблицы
@@ -30,70 +33,80 @@ PYTHONPATH=src python -m data.mbd_adapter --freq daily \
   Пояснения по флагам: 
 --mbd-root и --temp-dir \чтобы адаптер работал на хосте, а не только в контейнере; 
 --folds 0  для тестбеда достаточно одного фолда 
-путь выхода совпадает с дефолтом MBD_ADAPTED_DAILY_DEFAULT, поэтому шаг 3 не потребует --daily-path.
+путь выхода совпадает с дефолтом MBD_ADAPTED_DAILY_DEFAULT, поэтому шаг 4 не потребует --daily-path.
 Ожидание: две строки wrote ..., несколько минут.
 
 
-3) тестбед daily на свежей таблице mbd_daily→mbd_daily 
+3) тестбед daily_folds: дневные агрегации фолдов MBD 0 и 1
 
-PYTHONPATH=src python -m cross_schema.column_profiles --testbed-only --sample-rows 2000000 --testbed-variant daily_folds
-Результат: recovery: 12/12 exact (hungarian) - матчер вслепую восстановил все соответствия mbd_daily→mbd_daily 
+PYTHONPATH=src python -m cross_schema.column_profiles_vFGW --testbed-only --sample-rows 2000000 --structure-rows 200000 --testbed-variant daily_folds --out-dir data/profiles_vFGW
+Результат старого запуска passport-v1: recovery: 12/12 exact (hungarian) - матчер вслепую восстановил все соответствия mbd_daily→mbd_daily
 
 
 4) mbd_daily→mbd - сдвиг зернистости (нужна таблица из адаптера, шаг 2)
-PYTHONPATH=src python -m cross_schema.column_profiles --testbed-only --sample-rows 2000000 --testbed-variant daily
-Результат: recovery: 12/12 exact over real fields (hungarian) - матчер вслепую восстановил все соответствия mbd_daily→mbd_daily 
+PYTHONPATH=src python -m cross_schema.column_profiles_vFGW --testbed-only --sample-rows 2000000 --structure-rows 200000 --testbed-variant daily --out-dir data/profiles_vFGW
+Результат старого запуска passport-v1: recovery: 12/12 exact over real fields (hungarian) - матчер вслепую восстановил все соответствия mbd_daily→mbd_daily
 
 
-5) ТОЛЬКО матчинг xbank→mbd + якоря + заморозка (тестбеды уже проверены):
-PYTHONPATH=src python -m cross_schema.column_profiles --sample-rows 2000000 --no-testbed 
+5) ТОЛЬКО матчинг xbank→mbd + заморозка (тестбеды уже проверены):
+PYTHONPATH=src python -m cross_schema.column_profiles_vFGW --sample-rows 2000000 --structure-rows 200000 --no-testbed --out-dir data/profiles_vFGW
 
 
 
+PYTHONPATH=src python -m cross_schema.column_profiles_vFGW \
+  --testbed-variant all \
+  --sample-rows 2000000 \
+  --structure-rows 200000 \
+  --out-dir data/profiles_vFGW
+[folds_a] materializing source (sample_rows=2000000) ...
+[folds_a] profiling columns ...
+[folds_a] building dependency matrix on 200,000 rows ...
+[folds_a] done in 69.8s
+[folds_b] materializing source (sample_rows=2000000) ...
+[folds_b] profiling columns ...
+[folds_b] building dependency matrix on 200,000 rows ...
+[folds_b] done in 70.3s
+[folds] recovery: 12/12; solver=CONVERGED
+[daily_folds_a] materializing source (sample_rows=2000000) ...
+[daily_folds_a] profiling columns ...
+[daily_folds_a] building dependency matrix on 200,000 rows ...
+[daily_folds_a] done in 108.4s
+[daily_folds_b] materializing source (sample_rows=2000000) ...
+[daily_folds_b] profiling columns ...
+[daily_folds_b] building dependency matrix on 200,000 rows ...
+[daily_folds_b] done in 98.5s
+[daily_folds] recovery: 12/12; solver=CONVERGED
+[daily_a] materializing source (sample_rows=2000000) ...
+[daily_a] profiling columns ...
+[daily_a] building dependency matrix on 200,000 rows ...
+[daily_a] done in 124.6s
+[daily_b] materializing source (sample_rows=2000000) ...
+[daily_b] profiling columns ...
+[daily_b] building dependency matrix on 200,000 rows ...
+[daily_b] done in 58.3s
+[daily] recovery: 12/12; solver=CONVERGED
+[xbank] materializing source (sample_rows=2000000) ...
+[xbank] profiling columns ...
+[xbank] building dependency matrix on 200,000 rows ...
+[xbank] done in 88.7s
+[mbd] materializing source (sample_rows=2000000) ...
+[mbd] profiling columns ...
+[mbd] building dependency matrix on 200,000 rows ...
+[mbd] done in 53.1s
 
-Вызод такой:
-PYTHONPATH=src python -m cross_schema.column_profiles --sample-rows 2000000 --testbed-variant all
-Profiling xbank feature columns ...
-Profiling MBD feature columns (folds=[0]) ...
-Testbed 'folds': fold 0 anonymized vs fold 1 named ...
-  recovery: 12/12 exact (hungarian)
-Testbed 'daily_folds': daily fold 0 anonymized vs daily fold 1 named ...
-  recovery: 12/12 exact (hungarian)
-Testbed 'daily': adapted daily table vs raw hourly MBD ...
-  recovery: 12/12 exact over real fields (hungarian)
-Matching xbank -> MBD ...
-
-=== full correspondence table (xbank -> MBD) ===
-xbank_col     kind     mbd_field similarity   status
-    col_1     time    event_time               fixed
-    col_2 category    dst_type11     0.9546   mapped
-    col_3 category    src_type12     0.9106   mapped
-    col_4 category                           dropped
-    col_5 category      currency     0.9237   mapped
-    col_6 category    src_type11     0.7842   mapped
-    col_7 category                           dropped
-    col_8 category                           dropped
-    col_9 category                           dropped
-   col_10 category    event_type     0.9403   mapped
-   col_13 category                           dropped
-   col_14 category                           dropped
-   col_15 category                           dropped
-   col_16 category                           dropped
-   col_11  numeric                           dropped
-   col_12  numeric        amount     0.7903   mapped
-                   event_subtype            unfilled
-                      dst_type12            unfilled
-                      src_type21            unfilled
-                      src_type22            unfilled
-                      src_type31            unfilled
-                      src_type32            unfilled
-
-=== anchors ===
-xbank_col   expected                                           why_known auto_assigned   verdict
-    col_1 event_time             dtype DATE, range 2022-2024 (schema.py)    event_time        OK
-    col_2 event_type        report.html: MCC-like, 52 values (schema.py)    dst_type11 AMBIGUOUS
-   col_11     amount  one of the only two continuous columns (schema.py)          None      INFO
-   col_12     amount the other continuous column; which-is-which unknown        amount      INFO
-
-wrote 7 artifacts to /home/stsix/xbank-transfer/data/profiles; frozen_mapping.json is what inference reads
+=== xbank -> MBD input fields (source reuse allowed) ===
+    mbd_field xbank_col   status  distance  fgw_score  second_score  column_margin  candidate_count ambiguity  source_reuse_count
+       amount    col_12   mapped  0.105775        1.0           0.0            1.0                2 SEPARATED                   1
+   event_type     col_2   mapped  0.041055        1.0           0.0            1.0                4 SEPARATED                   4
+event_subtype     col_2   mapped  0.063166        1.0           0.0            1.0                4 SEPARATED                   4
+     currency     col_6   mapped  0.034383        1.0           0.0            1.0               12 SEPARATED                   1
+   src_type11     col_3   mapped  0.241901        1.0           0.0            1.0                4 SEPARATED                   2
+   src_type12     col_3   mapped  0.141646        1.0           0.0            1.0                2 SEPARATED                   2
+   dst_type11     col_2   mapped  0.050684        1.0           0.0            1.0                4 SEPARATED                   4
+   dst_type12     col_2   mapped  0.338297        1.0           0.0            1.0                2 SEPARATED                   4
+   src_type21      None unfilled       NaN        NaN           NaN            NaN                0       NaN                   0
+   src_type22    col_10   mapped  0.345933        1.0           0.0            1.0                3 SEPARATED                   2
+   src_type31      None unfilled       NaN        NaN           NaN            NaN                0       NaN                   0
+   src_type32    col_10   mapped  0.362506        1.0           0.0            1.0                3 SEPARATED                   2
+Solver: CONVERGED; wrote data/profiles_vFGW
 """

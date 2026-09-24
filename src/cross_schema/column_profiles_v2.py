@@ -10,8 +10,8 @@ data/profiles/ inside the repository):
                 similarity/matching -- only features may be aligned.
   2. similarity pairwise passport similarity in [0, 1], type-constrained
                 (numeric<->numeric, categorical<->categorical).
-  3. match      rectangular one-to-one assignment per type block; pairs below
-                --min-sim are dropped rather than forced, leftovers are
+  3. match      partial one-to-one assignment per type block; pairs below
+                --min-sim are excluded before optimization, leftovers are
                 reported explicitly (xbank: 13 cat + 2 num, MBD: 11 cat +
                 1 num -- the partial-mapping rule fixed in advance).
   4. testbed    sanity checks where truth is known by construction:
@@ -28,7 +28,10 @@ data/profiles/ inside the repository):
 
 Artifacts (all small, human-readable, git-diffable):
   xbank_profiles.csv  mbd_profiles.csv  similarity.csv  mapping.csv
-  testbed_recovery.csv  anchors.csv  frozen_mapping.json
+  testbed_recovery.csv  testbed_metrics.csv  anchors.csv  frozen_mapping.json
+  pair_diagnostics.csv  assignment_diagnostics.csv  correlation_diagnostics.json
+
+See MATCHING.md for formulas, limitations, and the quality evaluation protocol.
 
 Nothing here trains anything or touches checkpoints; every step is
 deterministic duckdb aggregation. The permutation runner will import
@@ -44,6 +47,7 @@ import argparse
 import json
 import math
 from datetime import datetime, timezone
+from itertools import combinations
 from pathlib import Path
 
 import duckdb
@@ -57,10 +61,10 @@ from data.schema import CATEGORY_COLS, EVENT_TIME_COL, NUMERIC_COLS
 # variables
 # --------------------------------------------------------------------------
 
-XBANK_TRX_DEFAULT = '/app/data/xbank_data/trans_any_pos_anonym_encoded.parquet'
-MBD_ROOT_DEFAULT = '/app/data/mbd_data/raw'
-MBD_ADAPTED_DAILY_DEFAULT = '/app/data/mbd_data/daily_adapted/transactions.parquet'
-OUT_DIR_DEFAULT = '/app/data/profiles'
+XBANK_TRX_DEFAULT = '/home/stsix/xbank-transfer/data/xbank_data/trans_any_pos_anonym_encoded.parquet'
+MBD_ROOT_DEFAULT = '/home/stsix/xbank-transfer/data/mbd'
+MBD_ADAPTED_DAILY_DEFAULT = '/home/stsix/xbank-transfer/data/mbd_daily/transactions_adapted_daily.parquet'
+OUT_DIR_DEFAULT = '/home/stsix/xbank-transfer/data/profiles_v2'
 
 MBD_TIME_FIELD = "event_time"
 MBD_NUMERIC_FIELDS = ("amount",)
@@ -73,26 +77,35 @@ MBD_CATEGORICAL_FIELDS = (
 # data/mbd_adapter.py) -- cast to BIGINT so profiles see codes, not floats
 MBD_DOUBLE_FIELDS = frozenset(MBD_CATEGORICAL_FIELDS[3:])
 
-N_BINS = 20          # equal-width bins on min-max-scaled numeric columns
-TOP_K_VALUES = 1000  # value-count cap for entropy / top-share estimates
+QUANTILE_LEVELS = (0.01, *[i / 20 for i in range(1, 20)], 0.99)
+MATCHER_VERSION = "passport-v2"
+# Heuristic starting weights, NOT probabilities or fitted/calibrated parameters.
+PASSPORT_WEIGHTS = {
+    "categorical": {"cardinality": 0.35, "entropy": 0.30, "top1": 0.20, "null": 0.15},
+    "numeric": {"quantile": 0.70, "zero": 0.15, "null": 0.15},
+}
+# Public alias retained for the v2 matcher and existing consumers.
+SIMILARITY_WEIGHTS = PASSPORT_WEIGHTS
 
 # structural pairs that never go through the matcher or permutations: the
 # event timestamp's counterpart is unambiguous by construction (dtype DATE
 # vs TIMESTAMP), the same way client ids are handled by the loaders
 FIXED_PAIRS = {EVENT_TIME_COL: MBD_TIME_FIELD}
 
-# это соответствие, в котором мы уверены до и независимо от матчинга.
+# Structural anchors are hard; inferred semantic hypotheses stay soft.
 ANCHORS = [
     (EVENT_TIME_COL, MBD_TIME_FIELD, "dtype DATE, range 2022-2024 (schema.py)", "hard"),
-    ("col_2", "event_type", "report.html: MCC-like, 52 values (schema.py)", "hard"),
+    ("col_2", "event_type", "hypothesis only: MCC-like does not establish event_type (schema.py)", "soft"),
     ("col_11", "amount", "one of the only two continuous columns (schema.py)", "soft"),
     ("col_12", "amount", "the other continuous column; which-is-which unknown", "soft"),
 ]
 
 _PASSPORT_CSV_COLS = [
-    "column", "kind", "n_rows", "null_share", "n_unique", "uniqueness",
+    "column", "kind", "n_rows", "n_valid", "null_share", "n_unique", "uniqueness",
     "entropy_norm", "top1_share", "top3_share",
     "min", "max", "mean", "std", "zero_share", "q05", "q25", "q50", "q75", "q95",
+    "numeric_subtype", "integer_share", "quantile_scale", "quantile_fallback",
+    "quantile_shape",
 ]
 
 
@@ -161,81 +174,83 @@ def col_specs_mbd():
 # --------------------------------------------------------------------------
 # passports
 # --------------------------------------------------------------------------
-# сompute entropy = h = -Σ p_i · log2(p_i) + normalize it
-def _entropy_norm(counts) -> float:
-    total = sum(counts)
-    if total <= 0 or len(counts) < 2:
-        return 0.0
-    h = -sum((c / total) * math.log2(c / total) for c in counts if c > 0)
-    return h / math.log2(len(counts))
+def _numeric_expr(expr: str) -> str:
+    # DuckDB treats NaN as a value, not SQL NULL. Exclude all non-finite values.
+    return f"CASE WHEN isfinite(CAST({expr} AS DOUBLE)) THEN CAST({expr} AS DOUBLE) END"
+
+
+def _quantile_shape(quantiles, lo, hi):
+    """Location/positive-scale invariant; central 90% span resists outliers.
+
+    Degenerate central spans fall back to 1--99%, then the full range.
+    The fallback is exported so zero-inflated/degenerate columns are visible.
+    """
+    q = dict(zip(QUANTILE_LEVELS, quantiles))
+    scale, fallback = q[0.95] - q[0.05], "none"
+    if scale == 0:
+        scale, fallback = q[0.99] - q[0.01], "q01_q99"
+    if scale == 0:
+        scale, fallback = hi - lo, "range"
+    if scale == 0:
+        return [0.0] * len(quantiles), 0.0, "constant"
+    return [(v - q[0.5]) / scale for v in quantiles], scale, fallback
 
 
 def profile_columns(con: duckdb.DuckDBPyConnection, from_sql: str, col_specs):
-    """One statistical passport per column; deterministic duckdb aggregates
-    only. Numeric passports additionally carry an in-memory `_hist` (N_BINS
-    equal-width shares of the min-max-scaled column) that fuels the
-    histogram-shape similarity -- it is deliberately NOT written to CSV."""
+    """Feature-only passports; shape statistics are conditional on valid values.
+
+    Missingness is a separate signal. Categorical entropy uses ALL non-null
+    counts (no top-k renormalization). Numeric quantiles and shape are exported
+    to CSV so the scoring inputs can be inspected.
+    """
     passports = {}
     for name, expr, kind in col_specs:
-
-        n_rows, n_not_null, n_unique = con.execute(
-            f"SELECT COUNT(*), COUNT({expr}), COUNT(DISTINCT {expr}) FROM ({from_sql})"
+        if kind not in SIMILARITY_WEIGHTS:
+            raise ValueError(f"Unsupported column kind: {kind}")
+        value = _numeric_expr(expr) if kind == "numeric" else (
+            f"CASE WHEN typeof({expr}) IN ('FLOAT', 'DOUBLE') "
+            f"AND NOT isfinite(TRY_CAST({expr} AS DOUBLE)) THEN NULL ELSE {expr} END")
+        source = f"SELECT {value} AS v FROM ({from_sql})"
+        n_rows, n_valid, n_unique = con.execute(
+            f"SELECT COUNT(*), COUNT(v), COUNT(DISTINCT v) FROM ({source})"
         ).fetchone()
-
         p = {
-            "column": name,
-            "kind": kind,
-            "n_rows": int(n_rows or 0),
-            "null_share": round(1.0 - n_not_null / n_rows, 4) if n_rows else 1.0, #<-- percentage of empty ones
-            "n_unique": int(n_unique or 0),
-            "uniqueness": round(n_unique / n_rows, 6) if n_rows else 0.0, #<-- percentage of unique ones
+            "column": name, "kind": kind, "n_rows": n_rows, "n_valid": n_valid,
+            "null_share": 1.0 - n_valid / n_rows if n_rows else 1.0,
+            "n_unique": n_unique,
+            "uniqueness": n_unique / n_rows if n_rows else 0.0,
         }
-
-        if n_not_null == 0:
+        if not n_valid:
             passports[name] = p
             continue
-
+        valid = f"SELECT v FROM ({source}) WHERE v IS NOT NULL"
         if kind == "categorical":
-            counts = [r[0] for r in con.execute(
-                f"SELECT cnt FROM (SELECT {expr} AS v, COUNT(*) AS cnt FROM ({from_sql}) "
-                f"GROUP BY v ORDER BY cnt DESC LIMIT {TOP_K_VALUES})"
-            ).fetchall()]
-            total = sum(counts)
-            p["top1_share"] = round(counts[0] / total, 4) if total else 0.0
-            p["top3_share"] = round(sum(counts[:3]) / total, 4) if total else 0.0
-            p["entropy_norm"] = round(_entropy_norm(counts), 4)
-
-        else:
-            (lo, hi, mean, std, zero_share,
-             q05, q25, q50, q75, q95) = con.execute(
-                f"SELECT MIN({expr}), MAX({expr}), AVG({expr}), STDDEV({expr}), "
-                f"AVG(CASE WHEN {expr} = 0 THEN 1.0 ELSE 0.0 END), "
-                f"quantile_cont({expr}, 0.05), quantile_cont({expr}, 0.25), "
-                f"quantile_cont({expr}, 0.50), quantile_cont({expr}, 0.75), "
-                f"quantile_cont({expr}, 0.95) FROM ({from_sql})"
+            # Aggregate counts in DuckDB rather than materializing the dictionary
+            # in Python. Missing values are excluded from this distribution.
+            entropy, top1, top3 = con.execute(
+                f"WITH counts AS (SELECT v, COUNT(*) AS cnt FROM ({valid}) GROUP BY v), "
+                "ranked AS (SELECT cnt, ROW_NUMBER() OVER (ORDER BY cnt DESC) AS r FROM counts) "
+                f"SELECT -SUM((cnt / {n_valid}) * log2(cnt / {n_valid})), "
+                f"MAX(cnt) / {n_valid}, "
+                f"SUM(CASE WHEN r <= 3 THEN cnt ELSE 0 END) / {n_valid} FROM ranked"
             ).fetchone()
-            span = (hi - lo) or 1.0
-            step = span / N_BINS
-            bin_exprs = []
-            for i in range(N_BINS):
-                if i < N_BINS - 1:
-                    cond = (f"{expr} >= {lo + i * step!r} AND {expr} < {lo + (i + 1) * step!r}")
-                else:  # last bin closed on both ends
-                    cond = f"{expr} >= {lo + i * step!r}"
-                bin_exprs.append(f"SUM(CASE WHEN {cond} THEN 1 ELSE 0 END)")
-            bins = con.execute(f"SELECT {', '.join(bin_exprs)} FROM ({from_sql})").fetchone()
-            total_bins = sum(bins)
-            hist = [round(b / total_bins, 6) for b in bins] if total_bins else [1.0 / N_BINS] * N_BINS
-            p.update(
-                min=lo, max=hi,
-                mean=round(mean, 6) if mean is not None else None,
-                std=round(std, 6) if std is not None else None,
-                zero_share=round(zero_share, 4),
-                q05=q05, q25=q25, q50=q50, q75=q75, q95=q95,
-                entropy_norm=round(_entropy_norm(hist), 4),
-                _hist=hist,
-            )
-
+            p.update(entropy_norm=entropy / math.log2(n_unique) if n_unique > 1 else 0.0,
+                     top1_share=top1, top3_share=top3)
+        else:
+            lo, hi, mean, std, zero, integer, quantiles = con.execute(
+                "SELECT MIN(v), MAX(v), AVG(v), STDDEV(v), "
+                "AVG(CASE WHEN v = 0 THEN 1.0 ELSE 0.0 END), "
+                "AVG(CASE WHEN v = trunc(v) THEN 1.0 ELSE 0.0 END), "
+                f"quantile_cont(v, {list(QUANTILE_LEVELS)}) FROM ({valid})"
+            ).fetchone()
+            shape, scale, fallback = _quantile_shape(quantiles, lo, hi)
+            subtype = "constant" if n_unique == 1 else "binary" if n_unique == 2 else "continuous"
+            q = dict(zip(QUANTILE_LEVELS, quantiles))
+            p.update(min=lo, max=hi, mean=mean, std=std, zero_share=zero,
+                     q05=q[0.05], q25=q[0.25], q50=q[0.5], q75=q[0.75], q95=q[0.95],
+                     numeric_subtype=subtype, integer_share=integer,
+                     quantile_scale=scale, quantile_fallback=fallback,
+                     quantile_shape=shape)
         passports[name] = p
     return passports
 
@@ -255,63 +270,100 @@ def _clip01(x: float) -> float:
     return max(0.0, min(1.0, x))
 
 
-def similarity(a: dict, b: dict) -> float:
-    """Passport similarity in [0, 1]; 0 across kinds. Deliberately
-    scale-FREE features only (cardinality magnitude, entropy, zero share,
-    histogram shape): xbank's amounts are pre-normalized to [0, 1] while
-    MBD's are raw rubles, so absolute ranges/min-max carry no signal. The
-    weights below are visible constants, not tuned anything."""
+def _cardinality_distance(a: dict, b: dict):
+    """Sample-size slack only when more observations also yield more categories.
+
+    This is a heuristic, not an estimator of the unseen category vocabulary.
+    Dividing cardinality by row count would penalize a fixed vocabulary when
+    its rows are merely replicated. Numeric cardinality is not used at all.
+    """
+    du = math.log10(max(a["n_unique"], 1)) - math.log10(max(b["n_unique"], 1))
+    dn = math.log10(max(a["n_valid"], 1)) - math.log10(max(b["n_valid"], 1))
+    unexplained = max(0.0, abs(du) - (abs(dn) if du * dn > 0 else 0.0))
+    return unexplained / 0.75
+
+
+def distance_components(a: dict, b: dict) -> dict:
+    """Weighted passport differences D in [0, 1], with explicit hard gates.
+
+    Rejected pairs have distance 1 as a finite placeholder; callers must also
+    check the reason. FGW consumes this distance directly.
+    """
+    def rejected(reason):
+        return {"distance": 1.0, "reason": reason, "distances": {}}
 
     if a["kind"] != b["kind"]:
-        return 0.0
-    
-    delta_un = abs(math.log10(max(a["n_unique"], 1)) - math.log10(max(b["n_unique"], 1)))
-
-    # cardinality gate: a field's value-count class is structural, like its
-    # type -- a 6-code column is not the same field as a 53-code one however
-    # similar their entropy/top-1 shapes. Identity testbeds cannot catch a
-    # missing cardinality signal (their cardinalities match by construction,
-    # so the penalty is always ~0 there); the col_2 anchor did: shape-only
-    # scores let low-card columns steal high-card fields.
-    if delta_un > 0.75:  # >~5.6x value-count mismatch: incompatible fields
-        return 0.0
-    
-    delta_entr = abs(a.get("entropy_norm", 0.0) - b.get("entropy_norm", 0.0))
-
+        return rejected("different_kinds")
+    if not a.get("n_valid", 0) or not b.get("n_valid", 0):
+        return rejected("no_valid_values")
+    distances = {"null": abs(a["null_share"] - b["null_share"])}
     if a["kind"] == "categorical":
-        delta_top = abs(a.get("top1_share", 0.0) - b.get("top1_share", 0.0))
-        return _clip01(1.0 - (0.4 * delta_un / 3.0 + 0.4 * delta_entr + 0.2 * delta_top))
-    
-    delta_zero = abs(a.get("zero_share", 0.0) - b.get("zero_share", 0.0))
-    hist_l1 = sum(abs(x - y) for x, y in zip(a.get("_hist", []), b.get("_hist", []))) / 2.0
-    return _clip01(1.0 - (0.25 * delta_un / 3.0 + 0.25 * delta_entr + 0.2 * delta_zero + 0.3 * hist_l1))
+        cardinality = _cardinality_distance(a, b)
+        if cardinality > 1.0:
+            return rejected("cardinality_gate")
+        distances.update(cardinality=cardinality,
+                         entropy=abs(a["entropy_norm"] - b["entropy_norm"]),
+                         top1=abs(a["top1_share"] - b["top1_share"]))
+    else:
+        # Integer-valued rubles can become floats under normalization: physical
+        # dtype/integer_share is diagnostic only, not a compatibility gate.
+        if a["numeric_subtype"] != b["numeric_subtype"]:
+            return rejected("different_numeric_subtypes")
+        qa, qb = a["quantile_shape"], b["quantile_shape"]
+        if len(qa) != len(QUANTILE_LEVELS) or len(qb) != len(QUANTILE_LEVELS):
+            raise ValueError("Rebuild passports with the current quantile grid")
+        # Mean L1 difference of normalized quantiles, bounded monotonically.
+        d = sum(abs(x - y) for x, y in zip(qa, qb)) / len(qa)
+        distances.update(quantile=d / (1.0 + d),
+                         zero=abs(a["zero_share"] - b["zero_share"]))
+    weights = PASSPORT_WEIGHTS[a["kind"]]
+    distance = _clip01(sum(weights[k] * distances[k] for k in weights))
+    return {"distance": distance, "reason": "compatible", "distances": distances}
+
+
+def similarity_components(a: dict, b: dict) -> dict:
+    """Compatibility interface for the v2 similarity-based matcher."""
+    result = distance_components(a, b)
+    return {"score": 1.0 - result["distance"], "reason": result["reason"],
+            "distances": result["distances"]}
+
+
+def similarity(a: dict, b: dict) -> float:
+    return similarity_components(a, b)["score"]
 
 
 def assign(sim: dict, row_names: list, col_names: list, min_sim: float = 0.30):
-    """Rectangular one-to-one assignment maximizing total similarity.
+    """Maximum total similarity over admissible edges, with optional abstention.
 
-    Prefers the optimal Hungarian solution (scipy); falls back to greedy
-    descending-similarity if scipy is unavailable. Pairs scoring below
-    min_sim are dropped rather than forced -- a column with no plausible
-    counterpart must end up in `dropped`, not in a fake pair.
-    
-    why do we use Hungarian solution? Example:
-                event_subtype  currency
-    col_3          0.80         0.79
-    col_4          0.78         0.10
-    Greedy algorithm assigns col_3 to event_subtype (0.80), leaving col_4 as currency (0.10). Total: 0.90.
-    Optimal: col_3 --> currency (0.79) + col_4 --> event_subtype (0.78). Total: 1.57.
+    Below-cutoff and zero/incompatible edges are removed BEFORE optimization.
+    Each row has a zero-utility dummy option. This preserves the sum-of-scores
+    objective without forcing an invalid pair. Greedy is an explicit fallback
+    when SciPy is absent, and is not guaranteed optimal.
     """
+    if not math.isfinite(min_sim) or not 0.0 <= min_sim <= 1.0:
+        raise ValueError("min_sim must be between 0 and 1")
+    if not row_names or not col_names:
+        return [], list(row_names), list(col_names), "empty"
     matrix = [[sim[r][c] for c in col_names] for r in row_names]
+    def admissible(score):
+        return math.isfinite(score) and score > 0 and score >= min_sim
+
     try:
         from scipy.optimize import linear_sum_assignment
         import numpy as np
-        ri, ci = linear_sum_assignment(-np.asarray(matrix))
-        chosen = list(zip(ri.tolist(), ci.tolist()))
+        utility = np.full((len(row_names), len(col_names) + len(row_names)), -1.0)
+        utility[:, len(col_names):] = 0.0
+        for i, row in enumerate(matrix):
+            for j, score in enumerate(row):
+                if admissible(score):
+                    utility[i, j] = score
+        ri, ci = linear_sum_assignment(-utility)
+        chosen = [(i, j) for i, j in zip(ri.tolist(), ci.tolist()) if j < len(col_names)]
         algorithm = "hungarian"
     except ImportError:
         cells = [(matrix[i][j], i, j)
-                 for i in range(len(matrix)) for j in range(len(matrix[0]))]
+                 for i in range(len(matrix)) for j in range(len(matrix[0]))
+                 if admissible(matrix[i][j])]
         cells.sort(reverse=True)
         chosen, taken_rows, taken_cols = [], set(), set()
         for _, i, j in cells:
@@ -322,12 +374,11 @@ def assign(sim: dict, row_names: list, col_names: list, min_sim: float = 0.30):
             chosen.append((i, j))
         algorithm = "greedy"
     pairs = [(row_names[i], col_names[j], round(matrix[i][j], 4))
-             for i, j in chosen if matrix[i][j] >= min_sim]
+             for i, j in chosen if admissible(matrix[i][j])]
     used_rows = {r for r, _, _ in pairs}
     used_cols = {c for _, c, _ in pairs}
-    dropped = [r for r in row_names if r not in used_rows]
-    unfilled = [c for c in col_names if c not in used_cols]
-    return pairs, dropped, unfilled, algorithm
+    return (pairs, [r for r in row_names if r not in used_rows],
+            [c for c in col_names if c not in used_cols], algorithm)
 
 
 def match_schemas(xbank_passports: dict, mbd_passports: dict, min_sim: float = 0.30):
@@ -340,13 +391,12 @@ def match_schemas(xbank_passports: dict, mbd_passports: dict, min_sim: float = 0
     for kind in ("numeric", "categorical"):
         rows = [n for n, p in xbank_passports.items() if p["kind"] == kind]
         cols = [n for n, p in mbd_passports.items() if p["kind"] == kind]
-        if not rows or not cols:
-            continue
         p_, d_, u_, a_ = assign(sim, rows, cols, min_sim)
         pairs += p_
         dropped += d_
         unfilled += u_
-        algorithm = a_
+        if a_ != "empty":
+            algorithm = a_
     mapping = dict(FIXED_PAIRS)
     mapping.update({r: c for r, c, _ in pairs})
     return mapping, pairs, dropped, unfilled, algorithm, sim 
@@ -354,8 +404,117 @@ def match_schemas(xbank_passports: dict, mbd_passports: dict, min_sim: float = 0
 
 
 # --------------------------------------------------------------------------
+# diagnostics (evidence, not correctness probabilities)
+# --------------------------------------------------------------------------
+
+def pair_diagnostics(passports_a, passports_b):
+    rows = []
+    for r, a in passports_a.items():
+        for c, b in passports_b.items():
+            result = similarity_components(a, b)
+            rows.append({"xbank_col": r, "mbd_field": c, "similarity": result["score"],
+                         "reason": result["reason"], **result["distances"]})
+    return pd.DataFrame(rows)
+
+
+def assignment_diagnostics(sim, pairs, min_sim=0.30, ambiguity_margin=0.05):
+    """Loss in the global objective when each selected edge is forbidden.
+
+    A zero gap means an equally good alternative mapping exists. Local row/
+    column margins additionally expose competition. Gaps require the exact
+    solver; the greedy fallback is explicitly marked unchecked.
+    """
+    rows, cols = list(sim), list(next(iter(sim.values()), {}))
+    base = sum(sim[r][c] for r, c, _ in pairs)
+    records = []
+    for r, c, _ in pairs:
+        score = sim[r][c]
+        row_best = max((sim[r][k] for k in cols if k != c
+                        and sim[r][k] > 0 and sim[r][k] >= min_sim), default=0.0)
+        col_best = max((sim[k][c] for k in rows if k != r
+                        and sim[k][c] > 0 and sim[k][c] >= min_sim), default=0.0)
+        altered = {k: dict(v) for k, v in sim.items()}
+        altered[r][c] = 0.0
+        alt, _, _, algorithm = assign(altered, rows, cols, min_sim)
+        gap = base - sum(sim[x][y] for x, y, _ in alt) if algorithm == "hungarian" else None
+        records.append({"xbank_col": r, "mbd_field": c, "similarity": score,
+                        "row_margin": score - row_best, "column_margin": score - col_best,
+                        "assignment_gap": max(0.0, gap) if gap is not None else None,
+                        "status": "UNCHECKED" if gap is None else
+                                  "AMBIGUOUS" if gap <= ambiguity_margin else "SEPARATED"})
+    return pd.DataFrame(records, columns=["xbank_col", "mbd_field", "similarity",
+                        "row_margin", "column_margin", "assignment_gap", "status"])
+
+
+def correlation_diagnostics(con, from_a, from_b, passports_a, passports_b, mapping,
+                            sample_rows=100000, min_pairs=30, warning_delta=0.3):
+    """Compare within-dataset Spearman relationships, never categorical codes.
+
+    Independent samples are appropriate: no cross-bank row alignment is used.
+    This is a drift warning, not proof of a bad match and not a score penalty.
+    """
+    matches = [(r, c) for r, c in mapping.items()
+               if r in passports_a and c in passports_b
+               and passports_a[r]["kind"] == passports_b[c]["kind"] == "numeric"]
+    if len(matches) < 2:
+        return {"status": "SKIPPED", "reason": "fewer than two matched numeric columns",
+                "pairs": []}
+    if sample_rows <= 0:
+        raise ValueError("correlation sample_rows must be positive")
+
+    def read(source, columns):
+        quoted = ['"' + c.replace('"', '""') + '"' for c in columns]
+        exprs = [f"{_numeric_expr(c)} AS v{i}" for i, c in enumerate(quoted)]
+        return con.execute(_maybe_sample(f"SELECT {', '.join(exprs)} FROM ({source})",
+                                         sample_rows)).df()
+
+    a = read(from_a, [r for r, _ in matches])
+    b = read(from_b, [c for _, c in matches])
+    records = []
+    for i, j in combinations(range(len(matches)), 2):
+        ca, cb = a[[f"v{i}", f"v{j}"]].dropna(), b[[f"v{i}", f"v{j}"]].dropna()
+        result = {"xbank_cols": [matches[i][0], matches[j][0]],
+                  "mbd_fields": [matches[i][1], matches[j][1]],
+                  "n_a": len(ca), "n_b": len(cb)}
+        if min(len(ca), len(cb)) < min_pairs or (ca.nunique() < 2).any() or (cb.nunique() < 2).any():
+            result.update(status="SKIPPED", reason="insufficient paired data or constant column")
+        else:
+            ra = float(ca.corr(method="spearman").iloc[0, 1])
+            rb = float(cb.corr(method="spearman").iloc[0, 1])
+            delta = abs(ra - rb)
+            result.update(rho_a=ra, rho_b=rb, delta=delta,
+                          status="WARNING" if delta > warning_delta else "CONSISTENT")
+        records.append(result)
+    statuses = {r["status"] for r in records}
+    return {"status": "WARNING" if "WARNING" in statuses else
+                      "SKIPPED" if statuses == {"SKIPPED"} else "PARTIAL" if "SKIPPED" in statuses else "CONSISTENT",
+            "method": "spearman", "sample_rows": sample_rows, "min_pairs": min_pairs,
+            "warning_delta": warning_delta, "pairs": records}
+
+
+# --------------------------------------------------------------------------
 # testbeds (truth known by construction)
 # --------------------------------------------------------------------------
+
+def testbed_metrics(frame: pd.DataFrame) -> dict:
+    """Precision on accepted pairs AND recall/coverage; missing truth is excluded.
+
+    Placeholder rows, where provided by a testbed, are known negatives.
+    No accepted pairs => precision is undefined, not a perfect score.
+    """
+    known = frame[frame["truth"].notna()]
+    positive = known["truth"] != "(placeholder)"
+    accepted = known["recovered"].notna()
+    correct = int((positive & accepted & (known["truth"] == known["recovered"])).sum())
+    n_accepted, n_positive = int(accepted.sum()), int(positive.sum())
+    n_negative = int((~positive).sum())
+    return {"correct": correct, "accepted": n_accepted, "true_pairs": n_positive,
+            "precision": correct / n_accepted if n_accepted else None,
+            "recall": correct / n_positive if n_positive else None,
+            "coverage": int((accepted & positive).sum()) / n_positive if n_positive else None,
+            "false_matches_on_negatives": int((accepted & ~positive).sum()),
+            "known_negatives": n_negative}
+
 
 def run_testbed_folds(con, mbd_root, fold_a, fold_b, sample_rows=0, min_sim=0.30):
     """Sanity floor: same schema on both sides, client-disjoint folds. Side
@@ -528,12 +687,11 @@ def check_anchors(mapping: dict, sim: dict = None, eps: float = 0.05) -> pd.Data
     """Three verdicts for hard anchors (soft anchors stay INFO):
     OK -- the matcher independently agreed with the trusted pair;
     AMBIGUOUS -- a near-tie: the assigned counterpart scores within eps of
-        the expected one, i.e. the passports carry NO signal separating the
-        lookalikes; freezing stays allowed, but the pair is flagged for the
-        permutation sensitivity analysis (a within-class swap);
-    FAIL -- confident disagreement: the matcher clearly preferred something
-        else (or dropped a column whose counterpart exists) -- red light,
-        freezing must not proceed."""
+        the expected one: this score cannot reliably separate the lookalikes;
+        the verdict is exported for subsequent sensitivity analysis;
+    FAIL -- confident disagreement with a trusted pair. Export remains an
+        UNVERIFIED candidate; a failed check must be resolved before using it
+        as a validated mapping. Soft hypotheses are never ground truth."""
     rows = []
     for col, expected, why, kind in ANCHORS:
         assigned = mapping.get(col)
@@ -567,11 +725,16 @@ def build_frozen_mapping(mapping, dropped, unfilled, algorithm, args, testbed_su
             },
             "testbed_recovery": testbed_summary,
             "matcher": {
+                "version": MATCHER_VERSION,
+                "weights": SIMILARITY_WEIGHTS,
+                "quantile_levels": list(QUANTILE_LEVELS),
+                "quantile_normalization": "(Q - median) / (Q95 - Q05); fallback Q99-Q01, then range",
+                "cardinality_gate": "categorical only: unexplained log10 cardinality gap <= 0.75",
                 "algorithm": algorithm,
                 "min_sim_cutoff": args.min_sim,
                 "rule": ("rectangular assignment per column type (numeric<->numeric, "
-                         "categorical<->categorical); pairs below the cutoff are dropped, "
-                         "not forced; event time is a fixed structural pair"),
+                         "categorical<->categorical); incompatible and below-cutoff pairs excluded "
+                         "before assignment with dummy unmatched options; event time fixed"),
             },
             "targets": "never profiled, matched or permuted -- feature columns only",
         },
@@ -593,6 +756,7 @@ def main():
                         help="optional row sample for a quick look (0 = full tables)")          #<--сэмпл для быстрого взгляда; сид зашит, так что сэмпл воспроизводим
     parser.add_argument("--min-sim", type=float, default=0.30,
                         help="pairs below this similarity are dropped, not forced")             #<--cutoff матчера: пары ниже - отбрасываются, а не форсируются
+
     parser.add_argument("--testbed-variant",
                         choices=["folds", "daily", "daily_folds", "both", "all"], default="both",
                         help="folds: raw<->raw sanity; daily: daily-adapted<->raw; "
@@ -618,15 +782,13 @@ def main():
         print("testbed-only: skipping xbank/MBD profiling and the main match", flush=True)
     else:
         print("Profiling xbank feature columns ...", flush=True)
-        xbank_passports = profile_columns(
-            con, materialize(con, xbank_source(args.xbank_path, args.sample_rows), "xbank"),
-            col_specs_xbank())
+        xbank_sql = materialize(con, xbank_source(args.xbank_path, args.sample_rows), "xbank")
+        xbank_passports = profile_columns(con, xbank_sql, col_specs_xbank())
         passports_to_frame(xbank_passports).to_csv(out / "xbank_profiles.csv", index=False)
 
         print(f"Profiling MBD feature columns (folds={args.mbd_folds}) ...", flush=True)
-        mbd_passports = profile_columns(
-            con, materialize(con, mbd_source(args.mbd_root, args.mbd_folds, args.sample_rows), "mbd"),
-            col_specs_mbd())
+        mbd_sql = materialize(con, mbd_source(args.mbd_root, args.mbd_folds, args.sample_rows), "mbd")
+        mbd_passports = profile_columns(con, mbd_sql, col_specs_mbd())
         passports_to_frame(mbd_passports).to_csv(out / "mbd_profiles.csv", index=False)
 
     testbed_frames = []
@@ -663,6 +825,11 @@ def main():
             print(f"  recovery: {summary}", flush=True)
     if testbed_frames:
         pd.concat(testbed_frames, ignore_index=True).to_csv(out / "testbed_recovery.csv", index=False)
+        metrics = [{"variant": frame["variant"].iloc[0], **testbed_metrics(frame)}
+                   for frame in testbed_frames]
+        pd.DataFrame(metrics).to_csv(out / "testbed_metrics.csv", index=False)
+        print("\n=== testbed metrics ===")
+        print(pd.DataFrame(metrics).to_string(index=False))
 
     if args.testbed_only:
         print(f"\ntestbed-only run finished; wrote testbed_recovery.csv to {out}")
@@ -681,7 +848,23 @@ def main():
     anchors = check_anchors(mapping, sim)
     anchors.to_csv(out / "anchors.csv", index=False)
 
+    pair_diagnostics(xbank_passports, mbd_passports).to_csv(out / "pair_diagnostics.csv", index=False)
+    confidence = assignment_diagnostics(sim, pairs, args.min_sim)
+    confidence.to_csv(out / "assignment_diagnostics.csv", index=False)
+    correlations = correlation_diagnostics(con, xbank_sql, mbd_sql,
+                                           xbank_passports, mbd_passports, mapping)
+    with open(out / "correlation_diagnostics.json", "w", encoding="utf-8") as f:
+        json.dump(correlations, f, indent=2, ensure_ascii=False, allow_nan=False)
+
     frozen = build_frozen_mapping(mapping, dropped, unfilled, algorithm, args, testbed_summary)
+    frozen["meta"]["validation"] = {
+        "status": "UNVERIFIED",
+        "note": "Scores and assignment gaps are not probabilities. Semantic ground truth is required.",
+        "ambiguous_pairs": int((confidence["status"] == "AMBIGUOUS").sum()),
+        "ambiguity_margin": 0.05,
+        "anchor_verdicts": anchors.to_dict(orient="records"),
+        "correlation_status": correlations["status"],
+    }
     with open(out / "frozen_mapping.json", "w", encoding="utf-8") as f:
         json.dump(frozen, f, indent=2, ensure_ascii=False)
 
@@ -689,7 +872,10 @@ def main():
     print(mapping_table.to_string(index=False))
     print("\n=== anchors ===")
     print(anchors.to_string(index=False))
-    print(f"\nwrote 7 artifacts to {out}; frozen_mapping.json is what inference reads")
+    print("\n=== assignment diagnostics ===")
+    print(confidence.to_string(index=False))
+    print(f"Correlation check: {correlations['status']}")
+    print(f"\nwrote artifacts to {out}; frozen_mapping.json is an UNVERIFIED candidate for inference")
 
 
 if __name__ == "__main__":
