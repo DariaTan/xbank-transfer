@@ -21,6 +21,10 @@ from training.tune_lightgbm_mbd import ALL_FOLDS, folds_for_test
 
 
 MODELS = ("coles", "cotic", "thp", "nep", "mlm")
+EXTRA_METRICS = ("precision_at_0_5", "recall_at_0_5",
+                 "precision_at_top_1pct", "recall_at_top_1pct",
+                 "precision_at_top_5pct", "recall_at_top_5pct",
+                 "precision_at_top_10pct", "recall_at_top_10pct")
 MATCHED_SETTINGS = ("target_file", "embedding_files", "seed", "trials",
                     "threads", "tune_client_cap", "max_rounds")
 
@@ -65,12 +69,19 @@ def collect(output_root: str | Path, models: tuple[str, ...] = MODELS,
                     not all(np.isfinite(metrics[key]) and 0 <= metrics[key] <= 1
                             for key in ("prevalence", "pr_auc", "roc_auc"))):
                     raise ValueError(f"{result_path}: invalid test metrics")
-                records.append({"model": model, "target": target, "test_fold": test_fold,
+                record = {"model": model, "target": target, "test_fold": test_fold,
                                 "n_rows": metrics["n_rows"],
                                 "prevalence": metrics["prevalence"],
                                 "pr_auc": metrics["pr_auc"],
                                 "roc_auc": metrics["roc_auc"],
-                                "final_rounds": result["final_rounds"]})
+                                "final_rounds": result["final_rounds"],
+                                "training_device": result.get("training_device", "cpu")}
+                for key in EXTRA_METRICS:
+                    if key in metrics:
+                        if not np.isfinite(metrics[key]) or not 0 <= metrics[key] <= 1:
+                            raise ValueError(f"{result_path}: invalid {key}")
+                        record[key] = metrics[key]
+                records.append(record)
     return pd.DataFrame.from_records(records)
 
 
@@ -78,6 +89,7 @@ def summarize(rows: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     grouped = rows.groupby(["model", "target"], sort=True)
     aggregate = grouped.agg(
         n_folds=("test_fold", "nunique"),
+        n_gpu_folds=("training_device", lambda devices: int((devices == "gpu").sum())),
         n_test_rows_total=("n_rows", "sum"),
         prevalence_mean=("prevalence", "mean"),
         pr_auc_mean=("pr_auc", "mean"),
@@ -85,6 +97,13 @@ def summarize(rows: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         roc_auc_mean=("roc_auc", "mean"),
         roc_auc_std=("roc_auc", "std"),
     ).reset_index()
+    for key in EXTRA_METRICS:
+        if key in rows:
+            if rows[key].isna().any():
+                raise ValueError(f"{key} exists for only some folds; backfill before summarizing")
+            metric = grouped[key].agg(["mean", "std"]).reset_index()
+            aggregate[f"{key}_mean"] = metric["mean"]
+            aggregate[f"{key}_std"] = metric["std"]
     if not (aggregate.n_folds == len(ALL_FOLDS)).all():
         raise ValueError("every model/target must have all five test folds")
     macro = aggregate.groupby("model", sort=True).agg(

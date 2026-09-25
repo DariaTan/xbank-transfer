@@ -9,10 +9,19 @@ import numpy as np
 import pandas as pd
 
 from training.summarize_lightgbm_mbd_cv import collect, fold_output, summarize
-from training.tune_lightgbm_mbd import candidate_params, folds_for_test, run
+from training.tune_lightgbm_mbd import _metrics, candidate_params, folds_for_test, run
 
 
 class MbdLightgbmHpoTests(unittest.TestCase):
+    def test_precision_recall_use_explicit_thresholds(self):
+        labels = np.array([1, 0, 1, 0, 0, 0, 0, 0, 0, 0], dtype=np.int8)
+        scores = np.array([0.9, 0.8, 0.7, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1])
+        metrics = _metrics(labels, scores)
+        self.assertAlmostEqual(metrics["precision_at_0_5"], 2 / 3)
+        self.assertAlmostEqual(metrics["recall_at_0_5"], 1.0)
+        self.assertAlmostEqual(metrics["precision_at_top_10pct"], 1.0)
+        self.assertAlmostEqual(metrics["recall_at_top_10pct"], 0.5)
+
     def test_search_is_deterministic_and_starts_with_baseline(self):
         first = candidate_params(42, 3, 2)
         self.assertEqual(first, candidate_params(42, 3, 2))

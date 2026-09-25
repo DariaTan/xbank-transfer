@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import average_precision_score, roc_auc_score
+from sklearn.metrics import average_precision_score, precision_score, recall_score, roc_auc_score
 
 from data.schema import TARGET_COLS, TARGETS_CLIENT_ID_COL, TARGETS_DATE_COL
 from training.paths import downstream_dir, embedding_dir, evaluation_name, load_data_config
@@ -99,21 +99,35 @@ def _load_joined(targets_path: Path, embeds_dir: Path) -> tuple[pd.DataFrame, li
 def _metrics(labels: np.ndarray, probabilities: np.ndarray) -> dict:
     if len(np.unique(labels)) != 2:
         raise ValueError("evaluation partition must contain both target classes")
-    return {
+    predicted = probabilities >= 0.5
+    positive_count = int(labels.sum())
+    result = {
         "n_rows": int(len(labels)),
         "prevalence": float(labels.mean()),
         "pr_auc": float(average_precision_score(labels, probabilities)),
         "roc_auc": float(roc_auc_score(labels, probabilities)),
+        "precision_at_0_5": float(precision_score(labels, predicted, zero_division=0)),
+        "recall_at_0_5": float(recall_score(labels, predicted, zero_division=0)),
     }
+    order = np.argsort(-probabilities, kind="stable")
+    ranked = labels[order]
+    for percent in (1, 5, 10):
+        top_n = max(1, int(round(len(labels) * percent / 100)))
+        true_positives = int(ranked[:top_n].sum())
+        result[f"precision_at_top_{percent}pct"] = true_positives / top_n
+        result[f"recall_at_top_{percent}pct"] = true_positives / positive_count
+    return result
 
 
 def run(model: str, data_config: str, output_root: str, seed: int,
         trials: int, threads: int, tune_client_cap: int, max_rounds: int,
-        test_fold: int = 4) -> None:
+        test_fold: int = 4, device_type: str = "cpu") -> None:
     import lightgbm as lgb
 
     if tune_client_cap < 1 or max_rounds < 1:
         raise ValueError("tune-client-cap and max-rounds must be positive")
+    if device_type not in ("cpu", "gpu"):
+        raise ValueError("device-type must be cpu or gpu")
     train_folds, val_fold = folds_for_test(test_fold)
     data_cfg = load_data_config(data_config)
     eval_name = evaluation_name(data_cfg)
@@ -171,19 +185,36 @@ def run(model: str, data_config: str, output_root: str, seed: int,
     X_train = train[cols].to_numpy(dtype=np.float32)
     X_val = val[cols].to_numpy(dtype=np.float32)
     X_test = test[cols].to_numpy(dtype=np.float32)
-    del joined, targets_path
+    labels = {target: (
+        tune[target].to_numpy(dtype=np.int8),
+        train[target].to_numpy(dtype=np.int8),
+        val[target].to_numpy(dtype=np.int8),
+        test[target].to_numpy(dtype=np.int8),
+    ) for target in TARGET_COLS}
+    del joined, train, val, test, tune, targets_path
     gc.collect()
 
     candidates = candidate_params(seed, trials, threads)
+    if device_type == "gpu":
+        candidates = [{**params, "device_type": "gpu", "gpu_platform_id": 0,
+                       "gpu_device_id": 0} for params in candidates]
     for target in TARGET_COLS:
         result_path = output / f"{target}_metrics.json"
         model_path = output / f"{target}_model.txt"
         if result_path.is_file() and model_path.is_file():
-            print(f"{target}: completed result exists, skipping", flush=True)
+            result = json.loads(result_path.read_text())
+            if "precision_at_top_5pct" not in result["test_metrics"]:
+                y_test = labels[target][3]
+                booster = lgb.Booster(model_file=str(model_path))
+                result["test_metrics"] = _metrics(y_test, booster.predict(X_test))
+                result.setdefault("training_device", "cpu")
+                _atomic_json(result_path, result)
+                del booster
+                print(f"{target}: backfilled precision/recall from saved model", flush=True)
+            else:
+                print(f"{target}: completed result exists, skipping", flush=True)
             continue
-        y_tune = tune[target].to_numpy(dtype=np.int8)
-        y_train = train[target].to_numpy(dtype=np.int8)
-        y_val = val[target].to_numpy(dtype=np.int8)
+        y_tune, y_train, y_val, y_test = labels[target]
         if any(len(np.unique(y)) != 2 for y in (y_tune, y_train, y_val)):
             raise ValueError(f"{target}: a development fold lacks one of the binary classes")
         tune_set = lgb.Dataset(X_tune, label=y_tune, feature_name=cols, free_raw_data=False)
@@ -221,11 +252,11 @@ def run(model: str, data_config: str, output_root: str, seed: int,
         y_dev = np.concatenate([y_train, y_val], axis=0)
         final_model = lgb.train(best_params, lgb.Dataset(X_dev, label=y_dev, feature_name=cols),
                                 num_boost_round=final_rounds)
-        y_test = test[target].to_numpy(dtype=np.int8)
         test_metrics = _metrics(y_test, final_model.predict(X_test))
         final_model.save_model(str(model_path))
         _atomic_json(result_path, {
             "target": target,
+            "training_device": device_type,
             "best_params": best_params,
             "tune_val_pr_auc": best_score,
             "full_val_metrics": final_val,
@@ -251,9 +282,11 @@ def main() -> None:
     parser.add_argument("--max-rounds", type=int, default=600)
     parser.add_argument("--test-fold", type=int, choices=ALL_FOLDS, default=4,
                         help="held-out test fold; raw fold 4 reuses the existing holdout outputs")
+    parser.add_argument("--device-type", choices=("cpu", "gpu"), default="cpu")
     args = parser.parse_args()
     run(args.model, args.data_config, args.output_root, args.seed, args.trials,
-        args.threads, args.tune_client_cap, args.max_rounds, args.test_fold)
+        args.threads, args.tune_client_cap, args.max_rounds, args.test_fold,
+        args.device_type)
 
 
 if __name__ == "__main__":
