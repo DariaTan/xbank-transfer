@@ -237,3 +237,52 @@ python src/training/train_downstream_mbd.py \
 Output: `lgbm_<target>.txt`/`mlp_<target>.pt` per target column, plus
 `results.csv` (xbank) or `results_all_folds.csv`/`results_aggregated.csv`
 (MBD, under `/app/data/downstream/<evaluation>/<source>/<model>/`).
+
+## Chronos-2 LightGBM (2026-10-01)
+
+Start the memory-capped queue from the Docker host:
+
+```bash
+bash environments/run_chronos_lightgbm.sh 0
+```
+
+The host tmux session `chronos-lightgbm-gpu0` uses one GPU and a 24-GiB
+container limit. It runs xbank's calendar probe, MBD-raw's five client-fold
+rotations, then produces the missing MBD-daily Chronos embeddings and runs
+the same five rotations there. Jobs wait for at least 32 GiB available RAM.
+A failure stops the queue; rerunning the launcher resumes completed targets
+and their saved hyperparameter selections.
+
+Chronos has 768 features, so the ordinary pandas-concatenation HPO loader is
+too large for the shared server. `tune_lightgbm_chronos.py` streams parquets
+into a temporary float32 disk cache and builds LightGBM bins through Sequence
+batches. The cache is removed after a successful corpus summary; checkpoints,
+metrics and manifests remain. Precision/recall are not calculated or backfilled.
+
+The MBD protocol is identical to the completed HPO runs: seed 42, four
+candidates, 50,000 tuning clients, at most 400 rounds; a preceding fold
+validates candidates/early stopping, three folds train, and all four
+development folds refit before the untouched test fold is scored. GPU bins
+use 255 values, matching the old MBD default. Xbank uses three candidates,
+300 rounds, 63 bins, the configured client-grouped 2023 train/validation
+split, and 2024-01/02 test; conflicting target `col_2` is excluded.
+
+Existing HPO probes used no class weighting or negative sampling; the Chronos
+probe follows that actual protocol. The manuscript's statement that every
+probe applies class weighting therefore needs to be corrected separately.
+PR-AUC is sklearn average precision and ROC-AUC is sklearn ROC AUC. MBD
+summaries give per-target mean/std across folds and an equal-weight macro
+average over four targets; xbank is a single calendar test over three targets.
+
+Outputs: `/app/data/downstream/<evaluation>/zero_shot/chronos2/`, with
+per-fold (or `lightgbm_hpo_calendar`) models/metrics plus
+`results_all_folds.csv`, `results_aggregated.csv`, `model_macro.csv`.
+Controller log: `/app/data/logs/chronos_lightgbm_controller.log`;
+per-stage logs: `/app/data/logs/chronos_lightgbm_*.log`.
+
+Chronos uses a strict pre-target-day cutoff and a full 12-month daily amount
+series. The five event encoders' existing MBD outputs use an inclusive cutoff
+and a 500-event cap; these differences must be disclosed in the comparison.
+Raw and daily amount normalization differs, so daily Chronos embeddings are
+computed separately. On xbank both frozen mappings select `col_12` as amount;
+the existing Chronos amount-only embeddings can serve both mapping references.

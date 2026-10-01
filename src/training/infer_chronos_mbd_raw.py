@@ -1,4 +1,4 @@
-"""Resumable, two-GPU Chronos-2 inference on raw MBD or matched xbank.
+"""Resumable, sharded Chronos-2 inference on raw/daily MBD or matched xbank.
 
 Prepare scans the raw adapted parquet once and aggregates every labeled
 client's transactions by calendar day. Workers read disjoint cached shards,
@@ -76,7 +76,10 @@ def _write_manifest(path: Path, manifest: dict) -> None:
     os.replace(temporary, path)
 
 
-def prepare(cache_dir: Path, out_dir: Path, manifest: dict) -> None:
+def prepare(cache_dir: Path, out_dir: Path, manifest: dict,
+            memory_gb: int = 40, threads: int = 16) -> None:
+    if memory_gb < 1 or threads < 1:
+        raise ValueError("prepare memory and threads must be positive")
     cache_manifest = cache_dir / "manifest.json"
     if cache_dir.exists():
         _check_manifest(cache_manifest, manifest)
@@ -89,8 +92,8 @@ def prepare(cache_dir: Path, out_dir: Path, manifest: dict) -> None:
             duckdb_tmp = data_root() / "duckdb_tmp" / "chronos2"
             duckdb_tmp.mkdir(parents=True, exist_ok=True)
             con = duckdb.connect()
-            con.execute("SET threads = 16")
-            con.execute("SET memory_limit = '40GB'")
+            con.execute(f"SET threads = {threads}")
+            con.execute(f"SET memory_limit = '{memory_gb}GB'")
             con.execute(f"SET temp_directory = '{_sql_path(duckdb_tmp)}'")
             con.execute(
                 f"CREATE TEMP TABLE target_clients AS SELECT DISTINCT {TARGETS_CLIENT_ID_COL} AS {CLIENT_ID_COL} "
@@ -101,7 +104,7 @@ def prepare(cache_dir: Path, out_dir: Path, manifest: dict) -> None:
             )
             last_day = manifest["target_dates"][-1]
             print(
-                f"Aggregating raw MBD to client/day: {first_day.date()}..{last_day}, "
+                f"Aggregating transactions to client/day: {first_day.date()}..{last_day}, "
                 f"{manifest['n_shards']} shards",
                 flush=True,
             )
@@ -284,14 +287,16 @@ def main() -> None:
     parser.add_argument("--n-shards", type=int, default=32)
     parser.add_argument("--worker-index", type=int, default=0)
     parser.add_argument("--workers", type=int, default=2)
+    parser.add_argument("--prepare-memory-gb", type=int, default=40)
+    parser.add_argument("--prepare-threads", type=int, default=16)
     args = parser.parse_args()
     if args.n_shards <= 0 or args.workers <= 0 or not 0 <= args.worker_index < args.workers:
         parser.error("n-shards and workers must be positive; worker-index must be in range")
 
     data_cfg = load_data_config(args.data_config)
     eval_name = evaluation_name(data_cfg)
-    if eval_name not in {"mbd_raw", "mbd_raw_smoke"} and data_cfg.get("name") != "xbank":
-        parser.error("Chronos raw runner requires MBD-raw or xbank data")
+    if eval_name not in {"mbd_raw", "mbd_raw_smoke", "mbd_daily"} and data_cfg.get("name") != "xbank":
+        parser.error("Chronos runner requires MBD-raw, MBD-daily or xbank data")
     with open(args.downstream_config) as file:
         inf = yaml.safe_load(file)["inference"]
     transactions = Path(data_cfg["paths"]["transactions"])
@@ -314,7 +319,7 @@ def main() -> None:
     cache_dir = data_root() / "chronos2_daily_cache" / eval_name
 
     if args.phase == "prepare":
-        prepare(cache_dir, out_dir, manifest)
+        prepare(cache_dir, out_dir, manifest, args.prepare_memory_gb, args.prepare_threads)
     else:
         _check_manifest(cache_dir / "manifest.json", manifest)
         _check_manifest(out_dir / "run_manifest.json", manifest)

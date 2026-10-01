@@ -8,10 +8,33 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
-from training.infer_chronos_mbd_raw import _manifest, _series_for_date, finalize, prepare
+from training.infer_chronos_mbd_raw import _manifest, _series_for_date, finalize, main, prepare
 
 
 class ChronosRawTests(unittest.TestCase):
+    def test_daily_cli_uses_daily_input_and_bounded_preparation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            transactions = root / "daily.parquet"
+            targets = root / "targets.parquet"
+            pd.DataFrame({"id": ["a", "a"],
+                          "col_1": pd.to_datetime(["2022-12-30", "2023-01-01"]),
+                          "col_11": [.25, 10.]}).to_parquet(transactions, index=False)
+            pd.DataFrame({"id": ["a"], "col_1": ["2023-01-01"]}).to_parquet(targets, index=False)
+            config = root / "daily.yaml"
+            config.write_text(f"name: mbd_daily\nevaluation_name: mbd_daily\npaths:\n"
+                              f"  transactions: {transactions}\n  targets: {targets}\n")
+            downstream = root / "downstream.yaml"
+            downstream.write_text("inference:\n  history_window_months: 12\n  embeds_dir: /app/data/embeds\n")
+            argv = ["infer_chronos_mbd_raw.py", "prepare", "--data-config", str(config),
+                    "--downstream-config", str(downstream), "--n-shards", "1",
+                    "--prepare-memory-gb", "1", "--prepare-threads", "1"]
+            with patch.dict(os.environ, {"XBANK_DATA_ROOT": temp}), patch("sys.argv", argv):
+                main()
+            cached = pd.read_parquet(root / "chronos2_daily_cache/mbd_daily/shards")
+            self.assertEqual(cached.value.tolist(), [.25])
+            self.assertTrue((root / "embeds/mbd_daily/zero_shot/chronos2/run_manifest.json").exists())
+
     def test_xbank_manifest_uses_matched_amount_column(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
