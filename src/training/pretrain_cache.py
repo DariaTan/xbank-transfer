@@ -26,12 +26,27 @@ from torch.utils.data import Dataset, Sampler
 
 from data.schema import ALL_FEATURE_COLS, CATEGORY_COLS, NUMERIC_COLS
 from ptls.preprocessing import PandasDataPreprocessor
+from ptls.preprocessing.pandas.pandas_transformation.pandas_freq_transformer import FrequencyEncoder
 from training.common import save_preprocessor
 from training.paths import data_root, load_data_config
 
 
 VERSION = 2
 ARRAYS = ("category.npy", "numeric.npy", "time.npy", "mark.npy", "offsets.npy")
+
+
+def category_keys(values: pd.Series) -> pd.Series:
+    # Nullable integer parquet columns may arrive as int in one Arrow batch
+    # and float in another. Their category identity must not be "7" vs "7.0".
+    return values.astype("string").str.replace(r"^(-?\d+)\.0+$", r"\1", regex=True).fillna("<MISSING>")
+
+
+class CanonicalFrequencyEncoder(FrequencyEncoder):
+    """Stored inside NEW preprocessors only; old checkpoints are unchanged."""
+    def transform(self, frame):
+        canonical = frame.copy(deep=False)
+        canonical[self.col_name_original] = category_keys(frame[self.col_name_original])
+        return super().transform(canonical)
 
 
 def atomic_json(path: Path, value: dict) -> None:
@@ -93,7 +108,8 @@ def fixed_split(clients: pd.DataFrame, seed: int, valid_frac: float) -> pd.DataF
 def preprocessor_from_counts(counts: dict[str, Counter]) -> PandasDataPreprocessor:
     preprocessor = PandasDataPreprocessor(
         col_id="id", col_event_time="event_time", event_time_transformation="none",
-        cols_category=CATEGORY_COLS, category_transformation="frequency",
+        cols_category=[CanonicalFrequencyEncoder(col_name_original=col) for col in CATEGORY_COLS],
+        category_transformation="frequency",
         cols_numerical=NUMERIC_COLS, return_records=True, n_jobs=1,
     )
     for transformer in preprocessor.cts_category:
@@ -117,7 +133,8 @@ def prepare_cache(source: Path, cache: Path, *, seed: int = 0, valid_frac: float
                 "seed": seed, "valid_frac": valid_frac, "max_seq_len": max_seq_len,
                 "n_clients": n_clients, "shards": shards, "minimum_train_events": 2,
                 "tie_order": ["col_1", *ALL_FEATURE_COLS],
-                "time_policy": "calendar_days_no_jitter", "pretraining_scope": "all_source_clients_no_labels"}
+                "time_policy": "calendar_days_no_jitter", "pretraining_scope": "all_source_clients_no_labels",
+                "category_policy": "canonical_numeric_integer_strings_explicit_missing"}
     if cache.exists() and not (cache / "manifest.json").exists() and any(cache.iterdir()):
         raise ValueError(f"refusing unowned/nonempty cache directory: {cache}")
     cache.mkdir(parents=True, exist_ok=True)
@@ -213,7 +230,7 @@ def prepare_cache(source: Path, cache: Path, *, seed: int = 0, valid_frac: float
                         frame = batch.to_pandas()
                         selected = frame[frame.id.isin(train_ids)]
                         for col in CATEGORY_COLS:
-                            counters[col].update(selected[col].astype(str).value_counts().to_dict())
+                            counters[col].update(category_keys(selected[col]).value_counts().to_dict())
                     print(f"train-only vocabulary {bucket + 1}/{shards}", flush=True)
                 preprocessor = preprocessor_from_counts(counters)
                 save_preprocessor(cache / "preprocessor.pkl", preprocessor)
@@ -248,7 +265,7 @@ def prepare_cache(source: Path, cache: Path, *, seed: int = 0, valid_frac: float
                     part_audit = {"unknown_train": {}, "unknown_valid": {}}
                     for i, col in enumerate(CATEGORY_COLS):
                         mapping = vocabulary["columns"][col]
-                        codes = frame[col].astype(str).map(mapping)
+                        codes = category_keys(frame[col]).map(mapping)
                         unseen = codes.isna().to_numpy()
                         part_audit["unknown_train"][col] = int((unseen & train_event).sum())
                         part_audit["unknown_valid"][col] = int((unseen & valid_event).sum())
@@ -257,7 +274,7 @@ def prepare_cache(source: Path, cache: Path, *, seed: int = 0, valid_frac: float
                     if not np.isfinite(numeric).all() or frame.col_1.isna().any() or frame.id.isna().any():
                         raise ValueError(f"non-finite/null source data in partition {bucket}")
                     times = pd.to_datetime(frame.col_1).astype("datetime64[ns]").astype("int64").to_numpy() // 10**9
-                    marks = frame.col_2.astype(str).map(vocabulary["event_codes"]).fillna(-1).to_numpy(dtype=np.int32)
+                    marks = category_keys(frame.col_2).map(vocabulary["event_codes"]).fillna(-1).to_numpy(dtype=np.int32)
                     offsets = np.r_[0, np.cumsum(local.n.to_numpy(dtype=np.int64))]
                     if int(offsets[-1]) != n_rows:
                         raise ValueError("cache/client offsets differ")

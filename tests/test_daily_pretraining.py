@@ -180,6 +180,16 @@ class DailyPretrainingTests(unittest.TestCase):
             flat = FlatCrossEntropy(ignore_index=0, reduction=reduction)(inputs, targets)
             torch.testing.assert_close(dense, flat)
 
+    def test_nullable_integer_categories_are_batch_invariant(self):
+        from training.pretrain_cache import CanonicalFrequencyEncoder, category_keys
+        integers = pd.Series([7, 2], dtype="int64")
+        floats = pd.Series([7., 2., np.nan])
+        self.assertEqual(category_keys(integers).tolist(), category_keys(floats).tolist()[:2])
+        encoder = CanonicalFrequencyEncoder("col_5")
+        encoder.mapping = {"7": 1, "2": 2, "<MISSING>": 3}
+        encoder.other_values_code = 4
+        self.assertEqual(encoder.transform(pd.DataFrame({"col_5": floats})).col_5.tolist(), [1, 2, 3])
+
     def test_validation_exclusive_category_is_not_fitted(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -202,9 +212,33 @@ class DailyPretrainingTests(unittest.TestCase):
             source, data, configs, cache = self.make_cache(root)
             output = root / "coles"
             first = train("coles", data, configs["coles"], cache, output, root / "logs", device="cpu")
+            self.assertEqual(torch.load(output / "last.ckpt", weights_only=False)["epoch"], 1)
             (output / "complete.json").unlink()
             recovered = train("coles", data, configs["coles"], cache, output, root / "logs", device="cpu")
             self.assertEqual(first, recovered)
+
+    def test_cotic_epoch_resume_matches_uninterrupted_weights(self):
+        from training.train_daily_encoders import SafetyCallback
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, data, configs, cache = self.make_cache(root)
+            full, resumed = root / "full", root / "resumed"
+            train("cotic", data, configs["cotic"], cache, full, root / "logs-full", device="cpu")
+            original = SafetyCallback.on_train_epoch_start
+
+            def interrupted(callback, trainer, module):
+                if trainer.current_epoch == 1:
+                    raise RuntimeError("simulated interruption")
+                original(callback, trainer, module)
+
+            with patch.object(SafetyCallback, "on_train_epoch_start", interrupted):
+                with self.assertRaisesRegex(RuntimeError, "simulated interruption"):
+                    train("cotic", data, configs["cotic"], cache, resumed, root / "logs-resume", device="cpu")
+            train("cotic", data, configs["cotic"], cache, resumed, root / "logs-resume", device="cpu")
+            first = torch.load(full / "last.ckpt", weights_only=False)
+            second = torch.load(resumed / "last.ckpt", weights_only=False)
+            for key, value in first["state_dict"].items():
+                torch.testing.assert_close(value, second["state_dict"][key], rtol=0, atol=0, msg=key)
 
 
 if __name__ == "__main__":

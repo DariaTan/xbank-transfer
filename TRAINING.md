@@ -63,6 +63,10 @@ uses all source clients, exact 95/5 client split (seed 0, sorted IDs),
 latest 500 events per client capped in DuckDB **before** pandas, and
 vocabularies fitted on **all eligible train events only**. Deterministic
 same-day ties use the feature tuple, not invented within-day timestamps.
+New preprocessors canonicalize nullable numeric category codes (`7` and
+`7.0` are the same category; missing values use an explicit token), both
+when fitting the cache and during subsequent inference. This does not
+alter category handling inside historical raw or NEP preprocessors.
 Clients with fewer than two events are excluded from new pretraining;
 TPP validation additionally drops unknown event marks. `audit.json` and
 each model's `cohort.json` record exclusions and unknown codes.

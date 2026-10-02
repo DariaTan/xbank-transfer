@@ -165,12 +165,14 @@ class StreamingModule(pl.LightningDataModule):
 
     def train_dataloader(self):
         return DataLoader(self.train_data, batch_sampler=NonSingletonBatches(self.sampler, self.batch_size),
-                          collate_fn=self.collate, num_workers=0)
+                          collate_fn=self.collate, num_workers=0,
+                          generator=torch.Generator().manual_seed(self.sampler.seed))
 
     def val_dataloader(self):
         return DataLoader(self.valid_data,
                           batch_sampler=NonSingletonBatches(SequentialSampler(self.valid_data), self.batch_size),
-                          collate_fn=self.collate, num_workers=0)
+                          collate_fn=self.collate, num_workers=0,
+                          generator=torch.Generator().manual_seed(self.sampler.seed + 1_000_000))
 
 
 class AtomicCheckpointIO(TorchCheckpointIO):
@@ -178,6 +180,14 @@ class AtomicCheckpointIO(TorchCheckpointIO):
         if storage_options is not None:
             raise ValueError("only local atomic checkpoint storage is supported")
         atomic_torch_save(checkpoint, path)
+
+
+class EpochCheckpoint(ModelCheckpoint):
+    """Lightning 2.6 only updates last on a top-k save; always save epochs."""
+    def on_train_epoch_end(self, trainer, pl_module):
+        super().on_train_epoch_end(trainer, pl_module)
+        if not trainer.sanity_checking and self._last_global_step_saved != trainer.global_step:
+            self._save_last_checkpoint(trainer, self._monitor_candidates(trainer))
 
 
 class SafetyCallback(Callback):
@@ -243,9 +253,10 @@ def masked_events(mask, probability):
 
 def build_plain_loaders(train_records, valid_records, model, cfg, seed, num_types):
     sampler = ShardSampler(train_records, seed)
-    args = {"batch_sampler": NonSingletonBatches(sampler, cfg["batch_size"]), "num_workers": 0}
+    args = {"batch_sampler": NonSingletonBatches(sampler, cfg["batch_size"]), "num_workers": 0,
+            "generator": torch.Generator().manual_seed(seed)}
     valid_args = {"batch_sampler": NonSingletonBatches(SequentialSampler(valid_records), cfg["batch_size"]),
-                  "num_workers": 0}
+                  "num_workers": 0, "generator": torch.Generator().manual_seed(seed + 1_000_000)}
     if model == "mlm":
         return (DataLoader(train_records, collate_fn=collate_feature_dict, **args),
                 DataLoader(valid_records, collate_fn=collate_feature_dict, **valid_args), sampler)
@@ -460,13 +471,15 @@ def train(model_name: str, data_config: Path, model_config: Path, cache: Path,
                 deterministic_cotic_loss(module)
                 monitor, mode = "val/log_likelihood", "max"
             datamodule = StreamingModule(train_records, valid_records, model_name, cfg["batch_size"], cfg["seed"], normalizer)
-            checkpoint = ModelCheckpoint(dirpath=str(output), filename="best", monitor=monitor, mode=mode,
-                                         save_last=True, save_top_k=1, enable_version_counter=False)
+            checkpoint = EpochCheckpoint(dirpath=str(output), filename="best", monitor=monitor, mode=mode,
+                                         save_last=True, save_top_k=1, enable_version_counter=False,
+                                         save_on_train_epoch_end=True)
             trainer = pl.Trainer(max_epochs=cfg["max_epochs"], accelerator="gpu" if device == "cuda" else "cpu",
                                  devices=1, deterministic=True, num_sanity_val_steps=2,
                                  logger=TensorBoardLogger(str(logs.parent), name=model_name),
                                  callbacks=[SafetyCallback(cfg["seed"]),
-                                            EarlyStopping(monitor=monitor, mode=mode, patience=cfg["patience"], check_finite=True),
+                                            EarlyStopping(monitor=monitor, mode=mode, patience=cfg["patience"],
+                                                          check_finite=True, check_on_train_epoch_end=False),
                                             checkpoint], plugins=[AtomicCheckpointIO()], enable_progress_bar=False)
             last = output / "last.ckpt"
             if last.exists():
@@ -488,7 +501,7 @@ def train(model_name: str, data_config: Path, model_config: Path, cache: Path,
             saved = torch.load(best_file, map_location="cpu", weights_only=False)
             best_epoch = int(saved["epoch"])
             scores = [value["best_model_score"] for key, value in saved.get("callbacks", {}).items()
-                      if "ModelCheckpoint" in key and value.get("best_model_score") is not None]
+                      if "Checkpoint" in key and value.get("best_model_score") is not None]
             if not scores:
                 raise ValueError("best checkpoint does not contain its monitored score")
             best_score = float(scores[0])
