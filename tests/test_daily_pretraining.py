@@ -170,6 +170,16 @@ class DailyPretrainingTests(unittest.TestCase):
             if key in gradients:
                 torch.testing.assert_close(value.grad, gradients[key], rtol=1e-4, atol=1e-6)
 
+    def test_flat_event_cross_entropy_preserves_loss(self):
+        from training.train_daily_encoders import FlatCrossEntropy
+        inputs = torch.randn(4, 7, 12, requires_grad=True)
+        targets = torch.randint(0, 7, (4, 12))
+        targets[0, -2:] = 0
+        for reduction in ("mean", "sum", "none"):
+            dense = torch.nn.CrossEntropyLoss(ignore_index=0, reduction=reduction)(inputs, targets)
+            flat = FlatCrossEntropy(ignore_index=0, reduction=reduction)(inputs, targets)
+            torch.testing.assert_close(dense, flat)
+
     def test_validation_exclusive_category_is_not_fitted(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

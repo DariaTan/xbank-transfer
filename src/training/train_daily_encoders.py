@@ -34,6 +34,21 @@ from training.pretrain_cache import (DiskRecords, ShardSampler, atomic_json, che
 MODELS = ("coles", "cotic", "thp", "mlm")
 
 
+class FlatCrossEntropy(torch.nn.CrossEntropyLoss):
+    """Same event loss, avoiding CUDA's nondeterministic spatial NLL path."""
+    def forward(self, inputs, target):
+        result = super().forward(inputs.movedim(1, -1).reshape(-1, inputs.shape[1]), target.reshape(-1))
+        return result.reshape_as(target) if self.reduction == "none" else result
+
+
+def deterministic_cotic_loss(module):
+    old = module.joined_head.downstream_head.event_type_loss
+    module.joined_head.downstream_head.event_type_loss = FlatCrossEntropy(
+        weight=old.weight, ignore_index=old.ignore_index, reduction=old.reduction,
+        label_smoothing=old.label_smoothing)
+    return module
+
+
 class NonSingletonBatches:
     """Keep every client; append a final singleton to the preceding batch."""
     def __init__(self, sampler, batch_size):
@@ -323,6 +338,7 @@ def probe_production_batch(model_name, cache, cfg, device="cuda"):
             from models.cotic import build_module, ExponentialNormalizerP99
             module = build_module(len(categories), in_channels=cfg["in_channels"],
                                   nb_filters=cfg["nb_filters"], nb_layers=cfg["nb_layers"])
+            deterministic_cotic_loss(module)
             normalizer = ExponentialNormalizerP99(1.)
         datamodule = StreamingModule(data, data, model_name, cfg["batch_size"], cfg["seed"], normalizer)
         trainer = pl.Trainer(max_epochs=1, limit_train_batches=1, limit_val_batches=0,
@@ -374,7 +390,10 @@ def train(model_name: str, data_config: Path, model_config: Path, cache: Path,
                 "code": {str(path.relative_to(Path(__file__).parents[1])): digest(path) for path in [
                     Path(__file__), Path(__file__).with_name("pretrain_cache.py"),
                     Path(__file__).with_name("common.py"),
-                    Path(__file__).parents[1] / "models" / f"{model_name}.py"]},
+                    Path(__file__).parents[1] / "models" / f"{model_name}.py",
+                    Path(__file__).parents[1] / "models" / "event_heads.py",
+                    Path(__file__).parents[1] / "models" / "trx_embedding.py",
+                    Path(__file__).parents[1] / "data" / "schema.py"]},
                 "torch": torch.__version__, "lightning": pl.__version__,
                 "seed_policy": "all_rng_strict_deterministic_fixed_validation",
                 "pretraining_scope": manifest["pretraining_scope"],
@@ -438,6 +457,7 @@ def train(model_name: str, data_config: Path, model_config: Path, cache: Path,
                     atomic_json(normalizer_meta, {"sha256": digest(normalizer_file), "lambda": normalizer.lambda_value})
                 module = build_module(len(categories), in_channels=cfg["in_channels"],
                                       nb_filters=cfg["nb_filters"], nb_layers=cfg["nb_layers"])
+                deterministic_cotic_loss(module)
                 monitor, mode = "val/log_likelihood", "max"
             datamodule = StreamingModule(train_records, valid_records, model_name, cfg["batch_size"], cfg["seed"], normalizer)
             checkpoint = ModelCheckpoint(dirpath=str(output), filename="best", monitor=monitor, mode=mode,

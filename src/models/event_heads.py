@@ -61,8 +61,8 @@ class EventPredictionHeads(nn.Module):
 
         for col, logits in cat_logits.items():
             ce = F.cross_entropy(
-                logits.transpose(1, 2), targets[col].long(), reduction="none"
-            )
+                logits.reshape(-1, logits.shape[-1]), targets[col].long().reshape(-1), reduction="none"
+            ).reshape_as(supervise_mask)
             total = total + (ce * supervise_mask).sum() / denom
 
         if num_pred is not None:
