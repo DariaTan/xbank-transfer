@@ -12,10 +12,9 @@ run parameter lives in that file, not on the command line) and
 `--data-config` (default `configs/data/xbank.yaml`, kept as the flag's
 default for backward compatibility, but see the standing decision below),
 which selects the pretraining CORPUS -- pass `configs/data/mbd.yaml`
-to pretrain on MBD-raw. `configs/data/mbd_daily.yaml` is now an
-inference-only aggregation-shift corpus; no new MBD-daily pretraining is
-planned. Always pass `--data-config configs/data/mbd.yaml` explicitly for
-the production training run.
+to pretrain on MBD-raw. For the new MBD-daily institutional-shift arm,
+use the safe runner below, not these legacy training scripts. Always pass
+`--data-config configs/data/mbd.yaml` explicitly for legacy raw training.
 `checkpoint_dir` is derived from `--data-config`'s own `name`.
 
 - Loads **all** clients from the configured corpus, not a sample.
@@ -34,7 +33,76 @@ the production training run.
   should go under the sibling `/app/data/checkpoints/mbd_source/<model>/`.
 
 
-## Launching in tmux
+## MBD-daily pretraining (2026-10-02)
+
+The approved new arm trains **CoLES, COTIC, THP and MLM**, while keeping
+the existing daily NEP unchanged. From the **Docker host**:
+
+```bash
+bash environments/run_mbd_daily_pretraining.sh
+tmux ls
+tail -f /mnt/storage/d.tanyushkina/transactions/logs/mbd_daily_pretrain_controller.log
+tail -f /mnt/storage/d.tanyushkina/transactions/logs/mbd_daily_pretrain_prepare.log
+tail -f /mnt/storage/d.tanyushkina/transactions/logs/mlm_mbd_daily_v2.log
+nvidia-smi
+```
+
+One CPU preparation precedes two queues: GPU0 MLM then CoLES; GPU1 THP
+then COTIC. Idle GPUs and available RAM are checked before starting;
+each disposable container is limited to 24 GiB RAM and six CPUs. A
+full-vocabulary, configured-batch, length-500 GPU preflight runs in a
+separate process before each model starts. Failure stops that queue, not
+the other GPU, and is logged; rerunning the launcher resumes saved epochs.
+Closing SSH does not stop the host tmux worker. Do not git pull or change
+training source/configs during an active run.
+
+Preparation stores only reusable encoded arrays and provenance under
+`/app/data/training_cache/mbd_daily/v2`; intermediate parquet/spill files
+are removed once the cache is validated. No labels are loaded. The cache
+uses all source clients, exact 95/5 client split (seed 0, sorted IDs),
+latest 500 events per client capped in DuckDB **before** pandas, and
+vocabularies fitted on **all eligible train events only**. Deterministic
+same-day ties use the feature tuple, not invented within-day timestamps.
+Clients with fewer than two events are excluded from new pretraining;
+TPP validation additionally drops unknown event marks. `audit.json` and
+each model's `cohort.json` record exclusions and unknown codes.
+
+Architectures and existing model configs are retained: early stopping
+patience 5, ceiling 100 epochs. Training fixes Python/NumPy/Torch/CUDA
+seeds, requires deterministic operations, isolates fixed validation RNG,
+rejects non-finite losses/gradients, and atomically saves `best` and `last`.
+There is no new gradient clipping or timestamp jitter. MLM computes heads
+only at supervised masked positions (same loss, less memory), with at
+least one mask per sequence. Resume reuses frozen preprocessing and checks
+data/config/code identity. An epoch interrupted mid-way is replayed from
+the previous saved epoch; it is not resumed at the exact batch.
+
+Weights: `/app/data/checkpoints/mbd_daily_source/{coles,cotic,thp,mlm}`.
+Logs: `/app/data/logs/*_mbd_daily_v2.log`, TensorBoard:
+`/app/data/lightning_logs/mbd_daily_source/<model>`.
+`complete.json` is the success marker, including best epoch/score/hash.
+Nothing writes into raw checkpoints, existing embeddings, downstream
+outputs or `/app/data/checkpoints/mbd_daily_source/nep`.
+
+Smoke testing (disposable files, automatically removed):
+
+```bash
+python -m training.smoke_daily_encoders --device cuda \
+  --temp-root /app/data --real-data-config /app/configs/data/mbd_daily.yaml \
+  --production-shapes
+```
+
+Scientific scope: like the historical raw run, this is **transductive
+unlabelled pretraining on the whole source corpus**, not a strict
+unseen-client/causal forecasting experiment. Downstream train/validation/
+test labels remain separated, but this does not undo pretraining exposure
+to test-client histories. Existing NEP uses the older preparation/split;
+it is retained for time reasons and is **not a matched rerun** of this
+four-model protocol. Cross-arm results should disclose that limitation.
+Institutional transfer still requires the agreed frozen xbank feature
+mapping; vocabulary semantics across banks are a separate research risk.
+
+## Legacy raw launching in tmux
 
 Run tmux inside the persistent container, but invoke it from the Docker
 host. One session per model means a closed SSH connection does not kill the

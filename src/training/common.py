@@ -7,6 +7,8 @@ since they already run through pl.Trainer.
 import json
 import os
 import pickle
+import random
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -15,6 +17,55 @@ import pandas as pd
 import torch
 from ptls.preprocessing import PandasDataPreprocessor
 from ptls.preprocessing.multithread_dispatcher import DaskDispatcher
+
+
+def seed_training(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    torch.use_deterministic_algorithms(True)
+
+
+def rng_state() -> dict:
+    return {"python": random.getstate(), "numpy": np.random.get_state(),
+            "torch": torch.get_rng_state(),
+            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []}
+
+
+def restore_rng(state: dict) -> None:
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch"].cpu())
+    if state["cuda"] and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all([value.cpu() for value in state["cuda"]])
+
+
+@contextmanager
+def validation_rng(seed: int):
+    """Stable validation randomness without consuming the training stream."""
+    previous = rng_state()
+    try:
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        yield
+    finally:
+        restore_rng(previous)
+
+
+def atomic_torch_save(value: dict, path: str | Path) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    torch.save(value, temporary)
+    os.replace(temporary, path)
+
+
+def finite_gradients(model: torch.nn.Module) -> None:
+    # Check the global norm, without changing the optimization algorithm.
+    torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf"), error_if_nonfinite=True)
 
 
 def split_indices(n: int, valid_frac: float = 0.05, seed: int = 0) -> Tuple[np.ndarray, np.ndarray]:
@@ -105,8 +156,10 @@ def save_preprocessor(path: Path, preprocessor: PandasDataPreprocessor) -> None:
     del preprocessor.multithread_dispatcher
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "wb") as f:
+        temporary = path.with_name(path.name + ".tmp")
+        with open(temporary, "wb") as f:
             pickle.dump(preprocessor, f)
+        os.replace(temporary, path)
     finally:
         preprocessor.multithread_dispatcher = dispatcher
 
@@ -143,6 +196,8 @@ class EarlyStopper:
         self.bad_epochs = 0
 
     def step(self, score: float, epoch: int) -> bool:
+        if not np.isfinite(score):
+            raise FloatingPointError(f"non-finite validation score at epoch {epoch}: {score}")
         improved = self.best is None or (
             score < self.best if self.mode == "min" else score > self.best
         )
@@ -167,7 +222,7 @@ def save_checkpoint(
     stopper: EarlyStopper,
 ) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    torch.save(
+    atomic_torch_save(
         {
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
@@ -175,6 +230,7 @@ def save_checkpoint(
             "best": stopper.best,
             "best_epoch": stopper.best_epoch,
             "bad_epochs": stopper.bad_epochs,
+            "rng_state": rng_state(),
         },
         path,
     )
@@ -191,10 +247,12 @@ def load_checkpoint(
     to resume from (one past the last epoch that was actually completed
     and saved).
     """
-    ckpt = torch.load(path, map_location=device)
+    ckpt = torch.load(path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model"])
     optimizer.load_state_dict(ckpt["optimizer"])
     stopper.best = ckpt["best"]
     stopper.best_epoch = ckpt["best_epoch"]
     stopper.bad_epochs = ckpt["bad_epochs"]
+    if "rng_state" in ckpt:
+        restore_rng(ckpt["rng_state"])
     return ckpt["epoch"] + 1

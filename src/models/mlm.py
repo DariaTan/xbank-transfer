@@ -65,11 +65,15 @@ class MLM(nn.Module):
         x = self.trx_embedding(payload, attention_mask)
         return self.backbone(inputs_embeds=x, attention_mask=attention_mask).last_hidden_state
 
-    def loss(self, payload: Dict[str, torch.Tensor], seq_len_mask: torch.Tensor) -> torch.Tensor:
+    def loss(self, payload: Dict[str, torch.Tensor], seq_len_mask: torch.Tensor,
+             event_mask: torch.Tensor | None = None) -> torch.Tensor:
         x = self.trx_embedding(payload, seq_len_mask)
 
         maskable = seq_len_mask.bool()
-        rand_mask = (torch.rand_like(seq_len_mask, dtype=torch.float) < self.mask_prob) & maskable
+        rand_mask = ((torch.rand_like(seq_len_mask, dtype=torch.float) < self.mask_prob) & maskable
+                     if event_mask is None else event_mask.bool())
+        if rand_mask.shape != maskable.shape or (rand_mask & ~maskable).any():
+            raise ValueError("MLM event mask must match real, non-padded positions")
         masked_x = torch.where(rand_mask.unsqueeze(-1), self.mask_embedding, x)
 
         hidden = self.backbone(
@@ -78,6 +82,15 @@ class MLM(nn.Module):
 
         targets = {col: payload[col] for col in self.heads.category_cols + self.heads.numeric_cols}
         supervise_mask = rand_mask.float()
+
+        if event_mask is not None:
+            # The new runner supplies a nonempty mask. Predict only supervised
+            # positions: identical objective, no huge logits for unused events.
+            if not rand_mask.any():
+                raise ValueError("MLM needs at least one supervised position")
+            hidden = hidden[rand_mask].unsqueeze(1)
+            targets = {col: value[rand_mask].unsqueeze(1) for col, value in targets.items()}
+            supervise_mask = torch.ones(hidden.shape[:2], device=hidden.device)
 
         cat_logits, num_pred = self.heads(hidden)
         return self.heads.loss(cat_logits, num_pred, targets, supervise_mask)

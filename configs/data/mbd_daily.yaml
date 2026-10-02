@@ -7,14 +7,14 @@
 # else (client domain, source paper, target schema) -- duplicated here only
 # where the inference representation actually differs.
 #
-# Purpose: inference-only aggregation-shift evaluation. A checkpoint trained
-# on MBD-raw (mbd.yaml) is applied to this daily representation; there is no
-# MBD-daily pretraining arm in the deadline-constrained protocol.
+# Purpose: aggregation-shift evaluation with raw checkpoints, plus the
+# daily-pretrained institutional-shift arm added 2026-10-02. New safe runner
+# trains CoLES/COTIC/THP/MLM; the existing daily NEP is retained, not retrained.
 # Weekly was considered and dropped -- only raw (mbd.yaml) and daily
 # (this file) are built.
 name: mbd_daily
 evaluation_name: mbd_daily
-role: inference_only_aggregation_shift
+role: aggregation_and_institutional_shift
 
 source:
   paper: "https://arxiv.org/abs/2409.17587"
