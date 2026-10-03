@@ -41,7 +41,7 @@ the existing daily NEP unchanged. From the **Docker host**:
 ```bash
 bash environments/run_mbd_daily_pretraining.sh
 tmux ls
-tail -f /mnt/storage/d.tanyushkina/transactions/logs/mbd_daily_pretrain_controller.log
+tail -f /mnt/storage/d.tanyushkina/transactions/logs/mbd-daily-pretrain_controller.log
 tail -f /mnt/storage/d.tanyushkina/transactions/logs/mbd_daily_pretrain_prepare.log
 tail -f /mnt/storage/d.tanyushkina/transactions/logs/mlm_mbd_daily_v2.log
 nvidia-smi
@@ -55,6 +55,28 @@ separate process before each model starts. Failure stops that queue, not
 the other GPU, and is logged; rerunning the launcher resumes saved epochs.
 Closing SSH does not stop the host tmux worker. Do not git pull or change
 training source/configs during an active run.
+
+Serialization repair (2026-10-03): production scripts now invoke
+`python -m training.daily_cli prepare ...` / `... train ...`, importing
+the original implementations so helper classes get stable pickle module
+names. Do not invoke the implementation modules directly with `python -m`.
+The compatible inference loader also reads the two original `__main__`
+helper references; it does not rewrite data, weights or manifests. Only
+load trusted project artifacts, as with ordinary pickle/Torch checkpoints.
+The original training/preparation/common source files remain unchanged so
+the provenance checks of existing THP and active COTIC still match.
+
+If GPU0 stopped before MLM, recover **only** its queue while GPU1 keeps
+running; this reuses the frozen complete cache and appends to model logs:
+
+```bash
+bash environments/run_mbd_daily_pretraining.sh --gpu0-only
+tail -f /mnt/storage/d.tanyushkina/transactions/logs/mbd-daily-pretrain-gpu0_controller.log
+```
+
+Recovery has its own host tmux session `mbd-daily-pretrain-gpu0`. The old
+controller may still report its historical GPU0 failure when GPU1 ends;
+use the recovery log and per-model `complete.json` for current status.
 
 Preparation stores only reusable encoded arrays and provenance under
 `/app/data/training_cache/mbd_daily/v2`; intermediate parquet/spill files

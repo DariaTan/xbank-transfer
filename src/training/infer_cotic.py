@@ -40,6 +40,7 @@ import yaml
 from data.loaders import build_cotic_sequences, sample_client_ids
 from data.splits import load_windowed_transactions_for_dates, unpack_window_id
 from models.cotic import EventDataset, build_module, extract_embeddings
+from training.artifact_compat import load_torch_checkpoint
 
 MODEL_NAME = "cotic"
 
@@ -93,7 +94,7 @@ def main():
         nb_filters=model_cfg["nb_filters"],
         nb_layers=model_cfg["nb_layers"],
     )
-    ckpt = torch.load(str(ckpt_dir / "best.ckpt"), map_location=device, weights_only=False)
+    ckpt = load_torch_checkpoint(ckpt_dir / "best.ckpt", map_location=device)
     module.load_state_dict(ckpt["state_dict"])
     net = module.net.to(device)
     net.eval()

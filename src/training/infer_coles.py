@@ -35,7 +35,7 @@ from data.loaders import build_ptls_records, sample_client_ids
 from data.schema import CLIENT_ID_COL
 from data.splits import load_windowed_transactions_for_dates, unpack_window_id
 from models.coles import build_module, extract_embeddings
-from training.common import load_preprocessor
+from training.artifact_compat import load_preprocessor
 
 MODEL_NAME = "coles"
 

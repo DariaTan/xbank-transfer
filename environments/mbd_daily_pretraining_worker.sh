@@ -3,6 +3,8 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DATA_DIR=/mnt/storage/d.tanyushkina/transactions
 IMAGE_NAME="${IMAGE_NAME:-xbank-transfer:latest}"
+MODE="${1:-all}"
+case "${MODE}" in all|--gpu0-only) ;; *) exit 2 ;; esac
 
 run_container() {
     local name="$1" gpu="$2"
@@ -57,8 +59,11 @@ run_job() {
     echo "START ${model} GPU=${gpu} $(date --iso-8601=seconds)" | tee -a "${log}"
     # Full-vocabulary shape preflight is a separate process, so neither its
     # optimizer step nor its RNG consumption can affect actual training.
-    run_container "${name}" "${gpu}" -m training.train_daily_encoders --model "${model}" --preflight >> "${log}" 2>&1
-    run_container "${name}" "${gpu}" -m training.train_daily_encoders --model "${model}" >> "${log}" 2>&1 9>&- &
+    if ! run_container "${name}" "${gpu}" -m training.daily_cli train --model "${model}" --preflight >> "${log}" 2>&1; then
+        echo "FAILED ${model} preflight; inspect ${log}" | tee -a "${log}"
+        return 1
+    fi
+    run_container "${name}" "${gpu}" -m training.daily_cli train --model "${model}" >> "${log}" 2>&1 9>&- &
     local job_pid=$!
     # Wait until Docker registered the reservation, or startup failed.
     until docker inspect "${name}" >/dev/null 2>&1; do
@@ -79,10 +84,19 @@ run_job() {
     fi
 }
 
+if [[ "${MODE}" == --gpu0-only ]]; then
+    # Reuse frozen preparation; never relaunch the live GPU1 queue.
+    echo "RECOVERY MLM -> CoLES, GPU0 only $(date --iso-8601=seconds)"
+    run_job 0 mlm
+    run_job 0 coles
+    echo "COMPLETE GPU0 recovery $(date --iso-8601=seconds)"
+    exit 0
+fi
+
 wait_resources cpu
 echo "START shared preparation $(date --iso-8601=seconds)"
 # Preparation is alone; the reservation lock can remain held until it exits.
-run_container daily-pretrain-prepare cpu -m training.pretrain_cache \
+run_container daily-pretrain-prepare cpu -m training.daily_cli prepare \
     >> "${DATA_DIR}/logs/mbd_daily_pretrain_prepare.log" 2>&1
 flock -u 9; exec 9>&-
 echo "DONE shared preparation $(date --iso-8601=seconds)"

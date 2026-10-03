@@ -37,7 +37,7 @@ from data.schema import (
     TARGETS_DATE_COL,
 )
 from data.splits import load_windowed_transactions_for_dates, unpack_window_id
-from training.common import load_preprocessor
+from training.artifact_compat import load_preprocessor, load_torch_checkpoint
 from training.embedding_io import atomic_parquet, validate_embedding_file, validate_embedding_frame
 from training.paths import checkpoint_dir, embedding_dir, evaluation_name, load_data_config, resolve_data_path
 
@@ -99,7 +99,7 @@ def _load_embedder(
             hidden_size=model_cfg["hidden_size"],
             num_layers=model_cfg["num_layers"],
         )
-        ckpt = torch.load(ckpt_dir / "best.ckpt", map_location=device, weights_only=False)
+        ckpt = load_torch_checkpoint(ckpt_dir / "best.ckpt", map_location=device)
         module.load_state_dict(ckpt["state_dict"])
         module.to(device).eval()
 
@@ -116,7 +116,7 @@ def _load_embedder(
 
         preprocessor = load_preprocessor(ckpt_dir / "preprocessor.pkl")
         cat_sizes = preprocessor.get_category_dictionary_sizes()
-        ckpt = torch.load(ckpt_dir / "best.pt", map_location=device, weights_only=False)
+        ckpt = load_torch_checkpoint(ckpt_dir / "best.pt", map_location=device)
         if model_name == "nep":
             model = NEP(
                 cat_sizes,
@@ -157,7 +157,7 @@ def _load_embedder(
             num_layers=model_cfg["num_layers"],
             gpu=0 if torch.cuda.is_available() else -1,
         )
-        ckpt = torch.load(ckpt_dir / "best.pt", map_location=device, weights_only=False)
+        ckpt = load_torch_checkpoint(ckpt_dir / "best.pt", map_location=device)
         model.load_state_dict(ckpt["model"])
         model.to(device).eval()
         tokenizer = build_tokenizer(num_types, max_len=inf["max_seq_len"])
@@ -185,7 +185,7 @@ def _load_embedder(
             nb_filters=model_cfg["nb_filters"],
             nb_layers=model_cfg["nb_layers"],
         )
-        ckpt = torch.load(ckpt_dir / "best.ckpt", map_location=device, weights_only=False)
+        ckpt = load_torch_checkpoint(ckpt_dir / "best.ckpt", map_location=device)
         module.load_state_dict(ckpt["state_dict"])
         net = module.net.to(device).eval()
 
