@@ -128,6 +128,71 @@ four-model protocol. Cross-arm results should disclose that limitation.
 Institutional transfer still requires the agreed frozen xbank feature
 mapping; vocabulary semantics across banks are a separate research risk.
 
+## Frozen daily-source inference (2026-10-05)
+
+After the four new runs complete, produce embeddings with the new daily
+weights plus the retained legacy NEP. The checkpoint corpus is explicitly
+`mbd_daily`; existing `mbd_source` embeddings are never overwritten. Both
+existing xbank matchings are retained without refitting/changing them:
+
+- `embeds/mbd_daily/mbd_daily_source/<model>`
+- `embeds/xbank_fgw_v2/mbd_daily_source/<model>` (new FGW matching)
+- `embeds/xbank/mbd_daily_source/<model>` (original matching)
+
+First run unit tests and disposable production-weight smoke locally, then
+commit/push and `git pull --ff-only` on the server. Local smoke supports
+`XBANK_DATA_ROOT` via its own isolated temporary tree. Server checks:
+
+```bash
+python -m unittest discover -s tests
+python -m training.smoke_daily_inference \
+  --checkpoint-root /app/data/checkpoints/mbd_daily_source \
+  --temp-root /app/data --device cuda --production-batch
+python -m training.smoke_daily_inference \
+  --checkpoint-root /app/data/checkpoints/mbd_daily_source \
+  --temp-root /app/data --device cuda --real-data
+```
+
+The smoke invokes the actual inference CLI for all 15 model/corpus cases,
+checks two dates, dimension/finite values/unique labeled-client IDs, actual
+CLI resume without rewriting outputs, and unchanged source checkpoints.
+Its fixture and embedding files are removed even on failure.
+
+Launch from the **Docker host** only after those checks pass:
+
+```bash
+bash environments/run_daily_source_inference.sh
+tmux ls
+tail -f /mnt/storage/d.tanyushkina/transactions/logs/daily-source-infer-gpu0_controller.log
+tail -f /mnt/storage/d.tanyushkina/transactions/logs/infer_mbd_daily_mbd_daily_source_coles.log
+nvidia-smi
+```
+
+GPU0 queues CoLES/NEP/MLM; GPU1 queues COTIC/THP. Each model runs MBD-daily,
+FGW xbank and original xbank sequentially. Independent host tmux sessions
+survive SSH disconnects. Disposable containers have read-only repository
+mounts, six CPUs and 32 GiB RAM ceilings; launch gates reserve the other
+queue's remaining RAM allowance and require an idle assigned GPU. CUDA is
+mandatory. Closing the terminal does not cancel the queues.
+
+`inference_daily_source.yaml` caps histories **in DuckDB before pandas**,
+using the daily training's latest-500/full-feature same-day tie policy.
+This is opt-in: historical raw inference retains its earlier tie/cap
+implementation. Windows remain 12 months, target populations/month grids
+come from the actual target tables; xbank target-day events are excluded.
+Batch size remains 256; 50K-client chunks bound host-memory usage. DuckDB
+uses four threads and an 8GB memory limit, spilling under the output
+directory on storage, with spill files removed after each chunk. Checkpoint
+hashes, input identities, frozen mapping and inference code hashes guard
+resume. Published months are atomic and partial chunks are resumable.
+
+These are technical tests, not a transfer-quality guarantee. Existing
+matchers align **columns**, not categorical meaning across institutions;
+unseen PTLS values use the frozen unknown code and TPP unknown marks are
+dropped as in the existing pipeline. Retained NEP is still not a matched
+rerun of the new four-model training protocol. Report these limitations
+and measure PR-AUC/ROC-AUC in the separate downstream stage.
+
 ## Legacy raw launching in tmux
 
 Run tmux inside the persistent container, but invoke it from the Docker

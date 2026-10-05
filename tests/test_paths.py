@@ -25,6 +25,10 @@ class PathTests(unittest.TestCase):
                 embedding_dir("/app/data/embeds", "mbd_raw", "mbd", "coles"),
                 embedding_dir("/app/data/embeds", "mbd_daily", "mbd", "coles"),
             )
+            self.assertNotEqual(
+                embedding_dir("/app/data/embeds", "xbank_fgw_v2", "mbd", "coles"),
+                embedding_dir("/app/data/embeds", "xbank_fgw_v2", "mbd_daily", "coles"),
+            )
 
     def test_data_config_paths_are_remapped(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"XBANK_DATA_ROOT": tmp}):

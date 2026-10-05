@@ -14,10 +14,12 @@ after every chunk has completed and passed structural validation.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import pickle
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -277,21 +279,23 @@ def _run_date(
         if empty_marker.exists():
             continue
 
-        windowed = load_windowed_transactions_for_dates(
-            str(transactions_path),
-            [target_date],
-            inf["history_window_months"],
-            inf["max_seq_len"],
-            client_ids=ids,
-            columns=columns,
-            include_cutoff=include_target_date_transactions,
-        )
+        with tempfile.TemporaryDirectory(prefix="window-spill-", dir=out_dir) as spill:
+            windowed = load_windowed_transactions_for_dates(
+                str(transactions_path), [target_date], inf["history_window_months"],
+                inf["max_seq_len"], client_ids=ids, columns=columns,
+                include_cutoff=include_target_date_transactions,
+                bounded=inf.get("bounded_windows", False),
+                memory_limit=inf.get("duckdb_memory_limit", "8GB"),
+                threads=inf.get("duckdb_threads", 4), temp_directory=spill,
+            )
         if windowed.empty:
             empty_marker.touch()
             print(f"{target_date}: chunk {i + 1}/{len(client_chunks)} has no history", flush=True)
             continue
 
         emb, window_ids = embed(windowed)
+        if len(emb) == 0:
+            raise ValueError(f"{target_date}: chunk {i} has history but no encodable clients; check frozen event vocabulary")
         inns = [unpack_window_id(str(window_id))[0] for window_id in window_ids]
         if len(emb) != len(inns):
             raise ValueError(f"row count mismatch: {len(emb)} embeddings vs {len(inns)} ids")
@@ -328,6 +332,7 @@ def main() -> None:
     parser.add_argument("--downstream-config", default="/app/configs/models/downstream_mbd.yaml")
     parser.add_argument("--model-config", default=None, help="default /app/configs/models/<model>.yaml")
     parser.add_argument("--checkpoint-source", default="mbd")
+    parser.add_argument("--require-cuda", action="store_true", help="refuse silent CPU fallback")
     parser.add_argument("--mapping-file", default=None,
                         help="frozen_mapping.json from cross_schema.column_profiles")
     cli = parser.parse_args()
@@ -354,6 +359,8 @@ def main() -> None:
         raise ValueError("xbank inference with an MBD checkpoint requires frozen schema_mapping")
     include_target_date_transactions = data_cfg.get("include_target_date_transactions", True)
     out_dir = embedding_dir(inf["embeds_dir"], eval_name, cli.checkpoint_source, cli.model)
+    if cli.require_cuda and not torch.cuda.is_available():
+        raise RuntimeError("GPU inference required; CUDA is unavailable")
     client_ids, target_dates = _target_population(targets_path, inf.get("n_clients"), inf.get("seed", 0))
     chunk_size = (
         inf.get("chronos2_chunk_size", 2000)
@@ -381,6 +388,30 @@ def main() -> None:
         manifest["schema_mapping_path"] = str(mapping.path)
     if not include_target_date_transactions:
         manifest["include_target_date_transactions"] = False
+    if inf.get("bounded_windows"):
+        manifest["window_policy"] = "sql_latest_events_feature_ties_desc_nulls_last_v1"
+    if inf.get("checkpoint_integrity"):
+        from training.pretrain_cache import source_identity
+        ckpt_dir = _check_checkpoint(cli.model, cli.checkpoint_source)
+        hashes = {name: hashlib.sha256((ckpt_dir / name).read_bytes()).hexdigest()
+                  for name in _required_checkpoint_files(cli.model)}
+        complete_path = ckpt_dir / "complete.json"
+        if complete_path.exists():
+            complete = json.loads(complete_path.read_text())
+            if hashes.get(complete["best_checkpoint"]) != complete["best_sha256"]:
+                raise ValueError("best checkpoint checksum differs from complete.json")
+        elif cli.model != "nep":
+            raise ValueError(f"missing training completion marker: {complete_path}")
+        manifest["checkpoint_files_sha256"] = hashes
+        manifest["retained_legacy_nep"] = cli.model == "nep"
+        manifest["input_file_identity"] = {"transactions": source_identity(transactions_path),
+                                           "targets": source_identity(targets_path)}
+        source_root = Path(__file__).parents[1]
+        manifest["inference_code_sha256"] = {
+            path: hashlib.sha256((source_root / path).read_bytes()).hexdigest()
+            for path in ("training/infer_mbd.py", "training/artifact_compat.py",
+                         "training/embedding_io.py", "data/splits.py", "data/loaders.py",
+                         "cross_schema/apply_mapping.py", f"models/{cli.model}.py")}
     _write_or_check_manifest(out_dir, manifest)
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")

@@ -1,0 +1,14 @@
+# New institutional-shift arm only. Historical raw outputs/configs unchanged.
+inference:
+  n_clients: null
+  seed: 0
+  history_window_months: 12
+  max_seq_len: 500
+  batch_size: 256
+  client_chunk_size: 50000
+  chronos2_value_col: col_11
+  embeds_dir: /app/data/embeds
+  bounded_windows: true
+  checkpoint_integrity: true
+  duckdb_memory_limit: 8GB
+  duckdb_threads: 4

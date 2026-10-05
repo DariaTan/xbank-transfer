@@ -25,7 +25,7 @@ from typing import List, Optional, Tuple
 import duckdb
 import pandas as pd
 
-from data.schema import CLIENT_ID_COL, EVENT_TIME_COL
+from data.schema import ALL_FEATURE_COLS, CLIENT_ID_COL, EVENT_TIME_COL
 
 WINDOW_ID_SEP = "::"
 
@@ -70,6 +70,10 @@ def load_windowed_transactions_for_dates(
     client_ids: Optional[List[str]] = None,
     columns: Optional[List[str]] = None,
     include_cutoff: bool = True,
+    bounded: bool = False,
+    memory_limit: str = "8GB",
+    threads: int = 4,
+    temp_directory: Optional[str] = None,
 ) -> pd.DataFrame:
     """Windowed/synthetic-id-stamped transactions for a fixed calendar-date
     grid applied to EVERY client (e.g. "the 1st of each month") -- the
@@ -85,8 +89,21 @@ def load_windowed_transactions_for_dates(
     `include_cutoff=False` excludes transactions on the target date. Xbank
     has transactions on its first-of-month target dates, so that setting
     avoids leaking same-day information into evaluation embeddings.
+    ``bounded=True`` opts into SQL-side capping with deterministic full-feature
+    tie ordering, explicit DuckDB resources and spill storage. Daily-source
+    inference uses it; historical raw inference retains its original policy.
     """
+    if not target_dates or client_ids == []:
+        return pd.DataFrame(columns=columns or [CLIENT_ID_COL, EVENT_TIME_COL])
+    if max_seq_len < 1:
+        raise ValueError("max_seq_len must be positive")
     con = duckdb.connect()
+    if bounded:
+        con.execute("SET memory_limit = ?", [memory_limit])
+        con.execute("SET threads = ?", [threads])
+        con.execute("SET preserve_insertion_order = false")
+        if temp_directory:
+            con.execute("SET temp_directory = ?", [temp_directory])
 
     params: List = [transactions_path]
     client_filter = ""
@@ -119,7 +136,27 @@ def load_windowed_transactions_for_dates(
           AND tx.{EVENT_TIME_COL} > d.target_date - INTERVAL ({history_window_months}) MONTH
           {client_filter}
     """
-    windowed = con.execute(windowed_query, params).df()
+    if bounded:
+        # Use the same daily training tie convention, independently of the
+        # projected model inputs. Only retained events reach pandas. The
+        # legacy path remains unchanged for historical raw runs.
+        available = {row[0] for row in con.execute(
+            "DESCRIBE SELECT * FROM read_parquet(?)", [transactions_path]).fetchall()}
+        tie_cols = [EVENT_TIME_COL, *[c for c in ALL_FEATURE_COLS if c in available]]
+        descending = ", ".join(f"tx.{c} DESC NULLS LAST" for c in tie_cols)
+        ascending = ", ".join(f"tx.{c} ASC NULLS FIRST" for c in tie_cols)
+        windowed_query += f"""
+            QUALIFY row_number() OVER (
+                PARTITION BY tx.{CLIENT_ID_COL}, d.target_date ORDER BY {descending}
+            ) <= {int(max_seq_len)}
+            ORDER BY tx.{CLIENT_ID_COL}, d.target_date, {ascending}
+        """
+    try:
+        windowed = con.execute(windowed_query, params).df()
+    finally:
+        con.close()
+    if bounded:
+        return windowed
 
     windowed = (
         windowed.sort_values([CLIENT_ID_COL, EVENT_TIME_COL])
