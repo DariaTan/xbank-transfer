@@ -45,7 +45,9 @@ for model in ${models}; do
             --downstream-config /app/configs/models/inference_daily_source.yaml \
             >> "${log}" 2>&1 9>&- &
         pid=$!
-        until docker inspect "${NAME}" >/dev/null 2>&1; do
+        # Do not unlock at the earlier Docker "created" state: the other
+        # queue reserves memory only for RUNNING containers.
+        until [[ "$(docker inspect --format '{{.State.Running}}' "${NAME}" 2>/dev/null || true)" == true ]]; do
             if ! kill -0 "${pid}" 2>/dev/null; then break; fi
             sleep 1
         done
