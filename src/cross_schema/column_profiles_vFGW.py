@@ -72,9 +72,13 @@ MBD_DOUBLE_FIELDS = frozenset(MBD_CATEGORICAL_FIELDS[3:])
 
 QUANTILE_LEVELS = (0.01, *[i / 20 for i in range(1, 20)], 0.99)
 
+# PASSPORT_WEIGHTS = {
+#     "categorical": {"cardinality": 0.35, "entropy": 0.30, "top1": 0.20, "null": 0.15},
+#     "numeric": {"quantile": 0.70, "zero": 0.15, "null": 0.15},
+# }
 PASSPORT_WEIGHTS = {
-    "categorical": {"cardinality": 0.35, "entropy": 0.30, "top1": 0.20, "null": 0.15},
-    "numeric": {"quantile": 0.70, "zero": 0.15, "null": 0.15},
+    "categorical": {"cardinality": 0.25, "entropy": 0.25, "top1": 0.25, "null": 0.25},
+    "numeric": {"quantile": 0.33, "zero": 0.33, "null": 0.33},
 }
 
 FIXED_PAIRS = {EVENT_TIME_COL: MBD_TIME_FIELD}
