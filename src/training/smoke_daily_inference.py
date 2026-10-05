@@ -75,7 +75,11 @@ def sample(root, name, checkpoint_root, real_data, production_batch):
     frame.to_parquet(transactions, index=False)
     pd.DataFrame([(client,date) for client in ids for date in dates],
                  columns=["id","col_1"]).to_parquet(targets,index=False)
-    original["paths"] = {"transactions": str(transactions), "targets": str(targets)}
+    # Virtual mount paths are remapped exactly once in the CLI child. An
+    # absolute temporary path already below /app/data would otherwise get
+    # prefixed a second time by XBANK_DATA_ROOT on the production server.
+    original["paths"] = {"transactions": f"/app/data/{name}-transactions.parquet",
+                         "targets": f"/app/data/{name}-targets.parquet"}
     original["evaluation_name"] = name
     if original.get("schema_mapping"):
         original["schema_mapping"] = str(REPO / "configs/mappings" / Path(original["schema_mapping"]).name)
@@ -116,7 +120,7 @@ def main():
                 from cross_schema.apply_mapping import FrozenSchemaMapping
                 from training.artifact_compat import load_preprocessor
                 data_cfg = yaml.safe_load(data.read_text())
-                raw = pd.read_parquet(data_cfg["paths"]["transactions"])
+                raw = pd.read_parquet(root/f"{name}-transactions.parquet")
                 mapping = FrozenSchemaMapping(data_cfg["schema_mapping"]) if data_cfg.get("schema_mapping") else None
                 for model in MODELS:
                     aligned = mapping.transform(raw,model) if mapping else raw

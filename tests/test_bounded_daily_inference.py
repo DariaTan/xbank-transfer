@@ -1,16 +1,34 @@
 import tempfile
+import os
 from pathlib import Path
 import unittest
 from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
+import yaml
 
 from data.splits import load_windowed_transactions_for_dates
 from training.infer_mbd import _run_date
+from training.paths import load_data_config
+from training.smoke_daily_inference import sample
 
 
 class BoundedDailyInferenceTests(unittest.TestCase):
+    def test_smoke_uses_virtual_paths_not_nested_absolute_app_data_paths(self):
+        with tempfile.TemporaryDirectory(prefix="daily-inference-smoke-") as temp:
+            root=Path(temp)
+            checkpoint=root/"weights"
+            (checkpoint/"cotic").mkdir(parents=True)
+            np.save(checkpoint/"cotic/categories.npy",np.array([0,1]))
+            config,_,_=sample(root,"mbd_daily",checkpoint,False,False)
+            self.assertEqual(yaml.safe_load(config.read_text())["paths"]["transactions"],
+                             "/app/data/mbd_daily-transactions.parquet")
+            with patch.dict(os.environ,{"XBANK_DATA_ROOT":str(root)}):
+                cfg=load_data_config(config)
+                self.assertEqual(Path(cfg["paths"]["transactions"]),root/"mbd_daily-transactions.parquet")
+                self.assertTrue(Path(cfg["paths"]["targets"]).is_file())
+
     def test_cap_and_ties_stable_across_projection_and_parquet_order(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
