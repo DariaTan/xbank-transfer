@@ -76,3 +76,50 @@ src/training/train_coles.py --n-clients 500 --max-epochs 1` (or any
 of the other `train_*.py` scripts, which hit the same
 `PandasDataPreprocessor` patch path) works right after `dbuild.sh` +
 `drun.sh` with no manual steps.
+
+## Daily-pretrained LightGBM queue
+
+Run **on the server host**, after pulling the tested revision:
+
+```bash
+bash environments/run_daily_source_lightgbm.sh 1
+tail -f /mnt/storage/d.tanyushkina/transactions/logs/daily_source_lightgbm_gpu1_controller.log
+tmux attach -t daily-source-lightgbm-gpu1
+```
+
+Detach with Ctrl-b, then d. The queue uses physical GPU 1 (OpenCL device 0
+inside its single-GPU container), 6 CPU threads, and a 24-GiB RAM limit.
+It waits for a free GPU and at least 40 GiB available host RAM. It does not
+stop other jobs or use GPU 0. Complete runs resume without overwriting results;
+changed inputs/settings abort rather than silently reusing an incompatible run.
+
+This queue evaluates CoLES, COTIC, THP, retained daily NEP, and MLM from
+`embeds/{mbd_daily,xbank,xbank_fgw_v2}/mbd_daily_source/`. It waits for all 12
+published dates of a representation; pending MLM does not block other encoders.
+Partial `_chunks` files are never inputs. Inference manifests and weight hashes
+are recorded in downstream provenance; both xbank mappings must use the same
+encoder checkpoint/preprocessor.
+
+MBD uses four independent binary targets, five client-disjoint test folds,
+four HPO candidates on at most 50,000 training clients, up to 400 rounds,
+`max_bin=255`. Xbank excludes target `col_2`, intersects the two mappings'
+client-date cohorts, uses client-disjoint training/validation in 2023 and an
+untouched 2024 test, three HPO candidates, up to 300 rounds, `max_bin=63`.
+Both use seed 42, no resampling/class weighting, validation average precision
+for selection, and refit on development rows before accessing test scores.
+Reported metrics are PR-AUC (average precision) and ROC-AUC only.
+
+Outputs are separate from all `mbd_source` and `zero_shot` results:
+
+```text
+downstream/mbd_daily/mbd_daily_source/<model>/lightgbm_hpo_cv/fold{0..4}/
+downstream/{xbank,xbank_fgw_v2}/mbd_daily_source/<model>/lightgbm_hpo_calendar/
+downstream/xbank_mapping_comparison/mbd_daily_source/<model>_paired_results.csv
+```
+
+Each model directory also receives `results_all_folds.csv`,
+`results_aggregated.csv` and `model_macro.csv`. Temporary streamed feature caches
+live on the storage volume and are removed only after successful final summaries;
+models, metrics, selections, manifests and logs remain for reproducibility.
+The retained NEP was not retrained with the new four-encoder training protocol,
+so label it as a retained baseline when reporting comparisons.

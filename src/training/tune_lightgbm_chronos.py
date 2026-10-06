@@ -228,23 +228,27 @@ def _dataset(sequence: IndexedSequence, labels: np.ndarray, params: dict,
 
 def run(data_config: str, downstream_config: str, test_fold: int, device: str,
         seed: int, trials: int, threads: int, tune_client_cap: int,
-        max_rounds: int, max_bin: int) -> None:
+        max_rounds: int, max_bin: int, *, model: str = MODEL,
+        checkpoint_source: str = "mbd", paired_rows: pd.DataFrame | None = None,
+        paired_sources: dict | None = None, embedding_provenance: dict | None = None) -> None:
     cfg = load_data_config(data_config)
     eval_name = evaluation_name(cfg)
-    if eval_name not in ("mbd_raw", "mbd_daily", "xbank"):
+    if eval_name not in ("mbd_raw", "mbd_daily", "xbank", "xbank_fgw_v2"):
         raise ValueError(f"unsupported evaluation: {eval_name}")
     is_mbd = eval_name.startswith("mbd_")
     probe = yaml.safe_load(Path(downstream_config).read_text())["probe"]
     target_cols = ["col_2", "col_3", "col_4", "col_5"] if is_mbd else list(probe["target_cols"])
     if not is_mbd and target_cols != ["col_3", "col_4", "col_5"]:
         raise ValueError("xbank Chronos must exclude conflicting target col_2")
-    output_root = downstream_dir("/app/data/downstream", eval_name, "mbd", MODEL)
+    if paired_rows is not None and (is_mbd or paired_sources is None):
+        raise ValueError("paired rows require xbank and signatures of both mappings")
+    output_root = downstream_dir("/app/data/downstream", eval_name, checkpoint_source, model)
     output = output_root / "lightgbm_hpo_cv" / f"fold{test_fold}" if is_mbd else output_root / "lightgbm_hpo_calendar"
     output.mkdir(parents=True, exist_ok=True)
-    files = sorted(embedding_dir("/app/data/embeds", eval_name, "mbd", MODEL).glob("*.parquet"))
+    files = sorted(embedding_dir("/app/data/embeds", eval_name, checkpoint_source, model).glob("*.parquet"))
     if not files:
         raise FileNotFoundError(f"no published Chronos embeddings for {eval_name}")
-    base_manifest = {"format_version": FORMAT_VERSION, "model": MODEL,
+    base_manifest = {"format_version": FORMAT_VERSION, "model": model,
                      "evaluation_name": eval_name, "target_file": signature(Path(cfg["paths"]["targets"])),
                      "embedding_files": [signature(p) for p in files], "targets": target_cols,
                      "seed": seed, "trials": trials, "threads": threads,
@@ -255,6 +259,16 @@ def run(data_config: str, downstream_config: str, test_fold: int, device: str,
                      "reported_metrics": ["pr_auc", "roc_auc"],
                      "test_fold": test_fold if is_mbd else None,
                      "calendar_probe": None if is_mbd else probe}
+    # Keep the original Chronos manifest byte-for-byte compatible on resume.
+    if model != MODEL or checkpoint_source != "mbd":
+        base_manifest["checkpoint_source"] = checkpoint_source
+    if embedding_provenance is not None:
+        base_manifest["embedding_provenance"] = embedding_provenance
+    if paired_rows is not None:
+        base_manifest["paired_sources"] = paired_sources
+        base_manifest["paired_cohort_sha256"] = hashlib.sha256(
+            pd.util.hash_pandas_object(paired_rows[KEYS + target_cols], index=False)
+            .values.tobytes()).hexdigest()
     check_manifest(output / "run_manifest.json", base_manifest)
     if all((output / f"{t}_metrics.json").exists() and (output / f"{t}_model.txt").exists()
            for t in target_cols):
@@ -263,6 +277,17 @@ def run(data_config: str, downstream_config: str, test_fold: int, device: str,
     cache = output_root / "_feature_cache"
     saved = prepare_cache(cache, Path(cfg["paths"]["targets"]), files, target_cols, is_mbd)
     rows = pd.read_parquet(cache / "rows.parquet")
+    row_offsets = np.arange(len(rows), dtype=np.int64)
+    if paired_rows is not None:
+        # Both variants use precisely the same ordered client-date cohort.
+        # Offset mapping keeps disk features aligned even if parquet order differs.
+        row_offsets = pd.MultiIndex.from_frame(rows[KEYS]).get_indexer(
+            pd.MultiIndex.from_frame(paired_rows[KEYS]))
+        if (row_offsets < 0).any() or paired_rows.duplicated(KEYS).any():
+            raise ValueError("paired cohort has absent or duplicate embedding keys")
+        rows = rows.iloc[row_offsets].reset_index(drop=True)
+        if not np.array_equal(rows[target_cols].to_numpy(), paired_rows[target_cols].to_numpy()):
+            raise ValueError("paired cohort labels disagree with cached targets")
     values = np.memmap(cache / "features.f32", dtype=np.float32, mode="r",
                        shape=(saved["capacity"], saved["n_features"]))
     train, val, test, tune, dev = split_rows(rows, is_mbd, test_fold, probe, seed, tune_client_cap)
@@ -285,7 +310,7 @@ def run(data_config: str, downstream_config: str, test_fold: int, device: str,
     if device == "gpu":
         for p in candidates:
             p.update(gpu_platform_id=0, gpu_device_id=0, gpu_use_dp=False)
-    sequences = {name: IndexedSequence(values, ids) for name, ids in
+    sequences = {name: IndexedSequence(values, row_offsets[ids]) for name, ids in
                  (("train", train), ("val", val), ("test", test), ("tune", tune), ("dev", dev))}
     selections = {}
     pending = [t for t in target_cols if not ((output / f"{t}_metrics.json").exists()
@@ -365,8 +390,9 @@ def run(data_config: str, downstream_config: str, test_fold: int, device: str,
     gc.collect()
 
 
-def summarize(eval_name: str, cleanup_cache: bool = False) -> None:
-    root = downstream_dir("/app/data/downstream", eval_name, "mbd", MODEL)
+def summarize(eval_name: str, cleanup_cache: bool = False, *, model: str = MODEL,
+              checkpoint_source: str = "mbd") -> None:
+    root = downstream_dir("/app/data/downstream", eval_name, checkpoint_source, model)
     is_mbd = eval_name.startswith("mbd_")
     records, reference = [], None
     for fold in range(5) if is_mbd else [None]:
@@ -380,7 +406,7 @@ def summarize(eval_name: str, cleanup_cache: bool = False) -> None:
             if not (directory / f"{target}_model.txt").exists():
                 raise ValueError(f"missing saved model for {target}")
             result = json.loads((directory / f"{target}_metrics.json").read_text())
-            records.append({"model": MODEL, "evaluation_name": eval_name, "target": target,
+            records.append({"model": model, "evaluation_name": eval_name, "target": target,
                             "test_fold": fold, **result["test_metrics"]})
     rows = pd.DataFrame(records)
     aggregate = rows.groupby(["model", "target"], sort=True).agg(
