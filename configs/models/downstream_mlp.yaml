@@ -1,0 +1,12 @@
+# Frozen-feature MLP, same outer splits as LightGBM. Test never selects a run.
+seed: 42
+batch_size: 16384
+max_epochs: 16
+patience: 4
+tune_client_cap: 50000
+threads: 6
+clip_standardized_features: 10.0
+candidates:
+  - {hidden: 128, lr: 0.001, dropout: 0.2, weight_decay: 0.0001, class_weight: none}
+  - {hidden: 256, lr: 0.0003, dropout: 0.2, weight_decay: 0.0001, class_weight: balanced}
+  - {hidden: 128, lr: 0.0003, dropout: 0.1, weight_decay: 0.001, class_weight: none}
