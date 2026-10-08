@@ -13,6 +13,8 @@ restart the existing service container. A failed job stops its worker; rerunning
 resumes targets whose manifest/model/metrics are complete. Input or code changes
 are rejected instead of silently mixing experiments. Do not change code or inputs
 while this queue is running.
+The larger 768-feature Chronos MBD panels are assigned to different GPUs;
+Xbank Chronos MLP goes to GPU1 while GPU0 owns Chronos FGW LightGBM.
 
 GPU0 first fits the missing Chronos FGW LightGBM probe, with exactly the seed,
 search budget and calendar split of the existing original-mapping baseline.

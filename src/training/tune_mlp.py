@@ -343,9 +343,13 @@ def queue_jobs():
     # Xbank first gives timely institutional-shift results. Keep all folds
     # of a representation on one worker so its cache has a single owner.
     jobs=[('xbank_pair',s,m) for s in ('mbd','mbd_daily') for m in MODELS if m!='chronos2']
-    jobs += [('xbank_pair','mbd','chronos2')]
-    jobs += [(e,s,m) for e,s in [('mbd_raw','mbd'),('mbd_daily','mbd'),('mbd_daily','mbd_daily')]
-             for m in MODELS if not (s=='mbd_daily' and m=='chronos2')]
+    # Chronos has six times as many features. Put Xbank Chronos on GPU1
+    # (GPU0 first owns its LightGBM run), and split the two large MBD
+    # Chronos panels across workers instead of assigning all three to GPU0.
+    jobs.insert(9, ('xbank_pair','mbd','chronos2'))
+    jobs += [(e,s,m) for m in MODELS
+             for e,s in [('mbd_raw','mbd'),('mbd_daily','mbd'),('mbd_daily','mbd_daily')]
+             if not (s=='mbd_daily' and m=='chronos2')]
     return jobs
 
 

@@ -72,6 +72,9 @@ def test_queue_is_unique_and_complete():
     jobs=queue_jobs();assert len(jobs)==28;assert len(set(jobs))==28
     assert ('xbank_pair','mbd','chronos2') in jobs
     assert not any(e=='mbd_raw' and s=='mbd_daily' for e,s,m in jobs)
+    assert jobs.index(('xbank_pair','mbd','chronos2'))%2==1
+    assert jobs.index(('mbd_raw','mbd','chronos2'))%2!=jobs.index(('mbd_daily','mbd','chronos2'))%2
+    assert len(jobs[::2])==len(jobs[1::2])==14
 
 
 def test_mbd_five_folds_resume_saved_model_and_preserve_lightgbm():
