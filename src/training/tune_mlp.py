@@ -33,6 +33,11 @@ MODELS = ('coles', 'cotic', 'thp', 'nep', 'mlm', 'chronos2')
 TARGETS_XBANK = ('col_3', 'col_4', 'col_5')
 
 
+def data_config_path(config_dir, evaluation):
+    # Historical production filename differs from its evaluation namespace.
+    return config_dir / 'data' / ('mbd.yaml' if evaluation == 'mbd_raw' else f'{evaluation}.yaml')
+
+
 def amp_dtype(device):
     return torch.bfloat16 if device.type == 'cuda' and torch.cuda.is_bf16_supported() else torch.float16
 
@@ -162,7 +167,7 @@ def checked_files(evaluation: str, source: str, model: str, config_dir: Path):
     provenance = json.loads(manifest.read_text()) if manifest.exists() else None
     # Historical raw-source runs do not all have inference manifests; their
     # immutable file signatures remain explicit and the cache validates keys.
-    cfg = load_data_config(config_dir / 'data' / f'{evaluation}.yaml')
+    cfg = load_data_config(data_config_path(config_dir, evaluation))
     dates = set(pd.read_parquet(cfg['paths']['targets'], columns=['col_1']).col_1.astype(str))
     if {p.stem for p in files} != dates: raise ValueError('target dates and embeddings differ')
     if model != 'chronos2' and (provenance is not None or source == 'mbd_daily'):
@@ -174,7 +179,7 @@ def checked_files(evaluation: str, source: str, model: str, config_dir: Path):
 def run_one(evaluation, source, model, fold, files, provenance, cfg, config_dir, device, paired=None, paired_sources=None):
     is_mbd = evaluation.startswith('mbd_')
     targets = [f'col_{i}' for i in range(2, 6)] if is_mbd else list(TARGETS_XBANK)
-    data_cfg = load_data_config(config_dir / 'data' / f'{evaluation}.yaml')
+    data_cfg = load_data_config(data_config_path(config_dir, evaluation))
     root = downstream_dir('/app/data/downstream', evaluation, source, model) / 'mlp_hpo'
     output = root / f'fold{fold}' if is_mbd else root / 'calendar'
     output.mkdir(parents=True, exist_ok=True)
@@ -315,7 +320,7 @@ def job(evaluation, source, model, config_dir, mlp_config, device):
     for e in evaluations: files[e],provenance[e]=checked_files(e,source,model,config_dir)
     paired=paired_sources=None
     if evaluation=='xbank_pair':
-        paths={load_data_config(config_dir/'data'/f'{e}.yaml')['paths']['targets'] for e in evaluations}
+        paths={load_data_config(data_config_path(config_dir,e))['paths']['targets'] for e in evaluations}
         if len(paths)!=1: raise ValueError('paired mappings use different targets')
         paired,_,_,_=paired_cohort(model,Path(paths.pop()),load_config(str(config_dir/'models/downstream.yaml')),files)
         paired=paired[KEYS+list(TARGETS_XBANK)].copy();paired['id']=paired.id.astype(str)

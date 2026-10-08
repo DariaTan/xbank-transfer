@@ -31,7 +31,8 @@ def fixture(root, mbd=True):
     target = root / 'targets.parquet'; pd.DataFrame(targets).to_parquet(target, index=False)
     evaluations = ['mbd_raw'] if mbd else ['xbank', 'xbank_fgw_v2']
     for e in evaluations:
-        (configs / 'data' / f'{e}.yaml').write_text(yaml.safe_dump({'name':e, 'evaluation_name':e, 'paths':{'targets':str(target)}}))
+        filename = 'mbd.yaml' if e == 'mbd_raw' else f'{e}.yaml'
+        (configs / 'data' / filename).write_text(yaml.safe_dump({'name':e, 'evaluation_name':e, 'paths':{'targets':str(target)}}))
         directory = root / 'embeds' / e / 'zero_shot/chronos2'; directory.mkdir(parents=True)
         for date in dates:
             # Reverse the FGW order and omit two clients: paired alignment must not use row offsets as keys.
