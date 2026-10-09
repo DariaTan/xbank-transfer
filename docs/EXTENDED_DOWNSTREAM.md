@@ -7,12 +7,21 @@ bash environments/run_extended_downstream.sh
 ```
 
 Two tmux workers (`extended-downstream-gpu0/1`) sequentially dispatch disposable
-containers, one physical GPU each, 6 CPUs and a hard 24-GiB RAM limit, no swap.
+containers, one physical GPU each, 6 CPUs and no swap. RAM caps are 24 GiB
+normally and 40 GiB for MBD Chronos MLP (its disk-backed panel is ~32 GiB).
+Admission reserves the actual caps of running own workers plus 8 GiB headroom.
 They wait for GPU availability and host RAM; they never stop other tasks or
 restart the existing service container. A failed job stops its worker; rerunning
 resumes targets whose manifest/model/metrics are complete. Input or code changes
 are rejected instead of silently mixing experiments. Do not change code or inputs
 while this queue is running.
+Resource-only host-script updates do not alter training implementation hashes,
+splits, hyperparameters or saved models. Existing Bash workers keep previously
+loaded functions: `chronos_ram_supervisor.sh` is a temporary live-update shim
+for them. It only raises eligible own MBD Chronos containers to 40 GiB under the
+same RAM admission lock, without restart, and exits when both queues end.
+Its log is `logs/extended_downstream_ram_supervisor.log`. Future launches use
+the updated worker policy directly and need no supervisor.
 The larger 768-feature Chronos MBD panels are assigned to different GPUs;
 Xbank Chronos MLP goes to GPU1 while GPU0 owns Chronos FGW LightGBM.
 

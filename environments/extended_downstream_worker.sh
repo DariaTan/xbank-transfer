@@ -4,6 +4,7 @@ set -euo pipefail
 GPU="${1:?physical GPU 0 or 1 required}"
 case "${GPU}" in 0|1) ;; *) exit 2 ;; esac
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${REPO_DIR}/environments/extended_downstream_resources.sh"
 DATA_DIR=/mnt/storage/d.tanyushkina/transactions
 CONTAINER="extended-downstream-gpu${GPU}"
 IMAGE="${IMAGE_NAME:-xbank-transfer:latest}"
@@ -22,21 +23,25 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 start_when_ready() {
+    local memory_gib reserved_bytes required_kib
+    memory_gib=$(task_memory_gib "$@")
     # Serialize admission, including the not-yet-allocated RAM reservation
     # of the other worker. GPU/device ownership is rechecked for every job.
     while true; do
         exec 8>/tmp/xbank-extended-downstream-admission.lock
         flock 8
-        ram_kib=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+        ram_kib=$(available_ram_kib)
+        reserved_bytes=$(reserved_worker_bytes)
+        required_kib=$(required_available_kib "${memory_gib}" "${reserved_bytes}")
         workers=$(docker ps --format '{{.Names}}' | awk '/^extended-downstream-gpu[01]$/ {n++} END {print n+0}')
         gpu_mem=$(nvidia-smi -i "${GPU}" --query-gpu=memory.used --format=csv,noheader,nounits)
-        if (( ram_kib >= ((workers + 1) * 24 + 8) * 1024 * 1024 && gpu_mem < 512 )) &&
+        if (( ram_kib >= required_kib && gpu_mem < 512 )) &&
            ! nvidia-smi --query-compute-apps=gpu_uuid --format=csv,noheader | grep -Fxq "${UUID}"; then
             if docker ps -a --format '{{.Names}}' | grep -Fxq "${CONTAINER}"; then
                 flock -u 8; echo "Existing container ${CONTAINER}; refusing overwrite" >&2; return 1
             fi
             docker run -d --name "${CONTAINER}" --user "$(id -u):$(id -g)" \
-                --gpus "device=${GPU}" --cpus=6 --memory=24g --memory-swap=24g --shm-size=1g \
+                --gpus "device=${GPU}" --cpus=6 --memory="${memory_gib}g" --memory-swap="${memory_gib}g" --shm-size=1g \
                 --read-only --tmpfs /tmp:rw,size=1g \
                 -v "${REPO_DIR}:/app:ro" -v "${DATA_DIR}:/app/data" \
                 -v /etc/OpenCL/vendors:/etc/OpenCL/vendors:ro \
@@ -46,7 +51,7 @@ start_when_ready() {
             owned=1; flock -u 8; exec 8>&-; return
         fi
         flock -u 8; exec 8>&-
-        echo "WAIT GPU=${GPU} RAM=$((ram_kib/1024/1024))GiB reserved_workers=${workers} $(date --iso-8601=seconds)"
+        echo "WAIT GPU=${GPU} RAM=$((ram_kib/1024/1024))GiB required=$((required_kib/1024/1024))GiB reserved_workers=${workers} $(date --iso-8601=seconds)"
         sleep 30
     done
 }
