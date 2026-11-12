@@ -33,10 +33,9 @@ use the safe runner below, not these legacy training scripts. Always pass
   should go under the sibling `/app/data/checkpoints/mbd_source/<model>/`.
 
 
-## MBD-daily pretraining (2026-10-02)
+## MBD-daily pretraining 
 
-The approved new arm trains **CoLES, COTIC, THP and MLM**, while keeping
-the existing daily NEP unchanged. From the **Docker host**:
+From the **Docker host**:
 
 ```bash
 bash environments/run_mbd_daily_pretraining.sh
@@ -70,7 +69,7 @@ If GPU0 stopped before MLM, recover **only** its queue while GPU1 keeps
 running; this reuses the frozen complete cache and appends to model logs:
 
 ```bash
-bash environments/run_mbd_daily_pretraining.sh --gpu0-only
+bash tests/run_mbd_daily_pretraining.sh --gpu0-only
 tail -f /mnt/storage/d.tanyushkina/transactions/logs/mbd-daily-pretrain-gpu0_controller.log
 ```
 
@@ -110,14 +109,6 @@ Logs: `/app/data/logs/*_mbd_daily_v2.log`, TensorBoard:
 Nothing writes into raw checkpoints, existing embeddings, downstream
 outputs or `/app/data/checkpoints/mbd_daily_source/nep`.
 
-Smoke testing (disposable files, automatically removed):
-
-```bash
-python -m training.smoke_daily_encoders --device cuda \
-  --temp-root /app/data --real-data-config /app/configs/data/mbd_daily.yaml \
-  --production-shapes
-```
-
 Scientific scope: like the historical raw run, this is **transductive
 unlabelled pretraining on the whole source corpus**, not a strict
 unseen-client/causal forecasting experiment. Downstream train/validation/
@@ -128,7 +119,7 @@ four-model protocol. Cross-arm results should disclose that limitation.
 Institutional transfer still requires the agreed frozen xbank feature
 mapping; vocabulary semantics across banks are a separate research risk.
 
-## Frozen daily-source inference (2026-10-05)
+## Frozen daily-source inference
 
 After the four new runs complete, produce embeddings with the new daily
 weights plus the retained legacy NEP. The checkpoint corpus is explicitly
@@ -139,29 +130,10 @@ existing xbank matchings are retained without refitting/changing them:
 - `embeds/xbank_fgw_v2/mbd_daily_source/<model>` (new FGW matching)
 - `embeds/xbank/mbd_daily_source/<model>` (original matching)
 
-First run unit tests and disposable production-weight smoke locally, then
-commit/push and `git pull --ff-only` on the server. Local smoke supports
-`XBANK_DATA_ROOT` via its own isolated temporary tree. Server checks:
-
-```bash
-python -m unittest discover -s tests
-python -m training.smoke_daily_inference \
-  --checkpoint-root /app/data/checkpoints/mbd_daily_source \
-  --temp-root /app/data --device cuda --production-batch
-python -m training.smoke_daily_inference \
-  --checkpoint-root /app/data/checkpoints/mbd_daily_source \
-  --temp-root /app/data --device cuda --real-data
-```
-
-The smoke invokes the actual inference CLI for all 15 model/corpus cases,
-checks two dates, dimension/finite values/unique labeled-client IDs, actual
-CLI resume without rewriting outputs, and unchanged source checkpoints.
-Its fixture and embedding files are removed even on failure.
-
 Launch from the **Docker host** only after those checks pass:
 
 ```bash
-bash environments/run_daily_source_inference.sh
+bash tests/run_daily_source_inference.sh
 tmux ls
 tail -f /mnt/storage/d.tanyushkina/transactions/logs/daily-source-infer-gpu0_controller.log
 tail -f /mnt/storage/d.tanyushkina/transactions/logs/infer_mbd_daily_mbd_daily_source_coles.log
@@ -205,15 +177,6 @@ docker exec xbank-transfer tmux new-session -d -s coles \
   'cd /app && CUDA_VISIBLE_DEVICES=0 python src/training/train_coles.py --data-config /app/configs/data/mbd.yaml 2>&1 | tee -a /app/data/logs/coles_mbd_raw.log'
 ```
 
-That's two models per GPU as a starting guess (CoLES+THP+MLM on GPU 0,
-COTIC+NEP on GPU 1) -- a starting guess, not a hard rule. COTIC/THP's
-convolution/attention over 500-length sequences are heavier per-sample
-than CoLES/NEP/MLM's GRU/transformer at the same batch size. If jobs
-sharing a GPU OOM or visibly slow each other down, run them one-at-a-time
-per GPU instead and queue the rest -- rerun the same tmux command for a
-queued model once a GPU frees up (a finished or early-stopped job releases
-its memory on process exit).
-
 **Watching progress:**
 
 ```bash
@@ -255,17 +218,6 @@ ssh -L 6006:localhost:6006 d.tanyushkina@10.16.84.4
 Then browse to `http://localhost:6006`. Stop it with
 `docker exec xbank-transfer pkill -f tensorboard` when done -- it keeps
 running (and holding the port) until then.
-
-## If a full-population load runs out of host RAM
-
-`load_all_raw` pulls every row into pandas in one shot (~91.5M rows across
-all clients). The host had 106GB free as of 2026-08-26, which should be
-enough for any single model's load (COTIC/THP project down to 3 columns;
-CoLES/NEP/MLM need all 16) -- but if a job OOMs: rerun it with `n_clients`
-(in `configs/models/<model>.yaml`) set to some large-but-bounded number as
-a stopgap, and flag it. A real
-chunked/streaming loader would be the actual fix, not built yet since it
-wasn't needed at smoke-test scale.
 
 ## Inference
 
@@ -314,14 +266,14 @@ MBD-raw inference with MBD-raw checkpoints is the current production path.
 From the Docker host, launch at most two models at a time with the helper:
 
 ```bash
-./environments/run_infer_mbd_raw.sh coles cotic
+./test/run_infer_mbd_raw.sh coles cotic
 ```
 
 To run the complete MBD-raw then MBD-daily matrix unattended, start the two
 sequential GPU queues:
 
 ```bash
-./environments/run_infer_mbd_queues.sh
+./test/run_infer_mbd_queues.sh
 ```
 
 GPU 0 runs CoLES/THP/MLM and GPU 1 runs COTIC/NEP. Each queue finishes its
@@ -355,7 +307,7 @@ are split between two GPUs. Unlike the five event models, Chronos sees the
 full 12-month daily history, with no 500-transaction cap. On the Docker host:
 
 ```bash
-./environments/run_chronos_mbd_raw.sh
+./tests/run_chronos_mbd_raw.sh
 ```
 
 The resumable job first writes its daily cache under
@@ -397,12 +349,12 @@ Output: `lgbm_<target>.txt`/`mlp_<target>.pt` per target column, plus
 `results.csv` (xbank) or `results_all_folds.csv`/`results_aggregated.csv`
 (MBD, under `/app/data/downstream/<evaluation>/<source>/<model>/`).
 
-## Chronos-2 LightGBM (2026-10-01)
+## Chronos-2 LightGBM
 
 Start the memory-capped queue from the Docker host:
 
 ```bash
-bash environments/run_chronos_lightgbm.sh 0
+bash tests/run_chronos_lightgbm.sh 0
 ```
 
 The host tmux session `chronos-lightgbm-gpu0` uses one GPU and a 24-GiB

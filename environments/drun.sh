@@ -24,6 +24,16 @@
 # writes once ownership was fixed manually) -- every new file the
 # container creates under /app/data or /hf_cache now lands owned by the
 # host user from the start, no manual chown needed going forward.
+# environments/passwd and environments/group are bind-mounted over
+# /etc/passwd and /etc/group (added 2026-09-21) because the image's own
+# copies have no entry for uid/gid 1013 -- purely cosmetic without this
+# (file ownership/permissions all work fine off the numeric ID alone),
+# but tools that resolve a UID to a name (`groups`, some shells) print
+# "cannot find name for group ID 1013" otherwise. Snapshotted once from
+# the base image's stock /etc/passwd+group with a d.tanyushkina:1013:1013
+# line appended -- stable across rebuilds since the base image is pinned
+# by digest (see Dockerfile). Regenerate both files (same append) if the
+# base image digest ever changes.
 # HOME=/tmp for the same reason: the base image bakes in HOME=/root, and
 # that env var isn't reset just because --user changes the running uid --
 # left as /root, any library that writes cache/config to $HOME (matplotlib
@@ -72,6 +82,8 @@ docker run -d \
     -v "${REPO_DIR}:/app" \
     -v "${DATA_DIR}:/app/data" \
     -v "${HF_CACHE_DIR}:/hf_cache" \
+    -v "${REPO_DIR}/environments/passwd:/etc/passwd:ro" \
+    -v "${REPO_DIR}/environments/group:/etc/group:ro" \
     -e HF_HOME=/hf_cache \
     -e HOME=/tmp \
     -e PYTHONPATH=/app/src \
