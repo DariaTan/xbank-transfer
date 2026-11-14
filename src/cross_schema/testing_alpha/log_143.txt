@@ -1,0 +1,160 @@
+Grid: 13 copies x 11 alphas = 143 FGW calls; up to 715 optimizer starts
+Profiling clean MBD ...
+Reading one MBD sample (up to 2,000,000 rows) ...
+[clean] corrupting and profiling once ...
+[1/143] clean alpha=0: 12/12 correct, 0 unfilled; CONVERGED
+[2/143] clean alpha=0.1: 12/12 correct, 0 unfilled; CONVERGED
+[3/143] clean alpha=0.2: 12/12 correct, 0 unfilled; CONVERGED
+[4/143] clean alpha=0.3: 12/12 correct, 0 unfilled; CONVERGED
+[5/143] clean alpha=0.4: 12/12 correct, 0 unfilled; CONVERGED
+[6/143] clean alpha=0.5: 12/12 correct, 0 unfilled; CONVERGED
+[7/143] clean alpha=0.6: 12/12 correct, 0 unfilled; CONVERGED
+[8/143] clean alpha=0.7: 12/12 correct, 0 unfilled; CONVERGED
+[9/143] clean alpha=0.8: 12/12 correct, 0 unfilled; CONVERGED
+[10/143] clean alpha=0.9: 12/12 correct, 0 unfilled; CONVERGED
+[11/143] clean alpha=1: 12/12 correct, 0 unfilled; CONVERGED
+[mixed_015/seed_0] corrupting and profiling once ...
+[12/143] mixed_015/seed_0 alpha=0: 12/12 correct, 0 unfilled; CONVERGED
+[13/143] mixed_015/seed_0 alpha=0.1: 12/12 correct, 0 unfilled; CONVERGED
+[14/143] mixed_015/seed_0 alpha=0.2: 12/12 correct, 0 unfilled; CONVERGED
+[15/143] mixed_015/seed_0 alpha=0.3: 11/12 correct, 0 unfilled; CONVERGED
+[16/143] mixed_015/seed_0 alpha=0.4: 10/12 correct, 0 unfilled; CONVERGED
+[17/143] mixed_015/seed_0 alpha=0.5: 12/12 correct, 0 unfilled; CONVERGED
+[18/143] mixed_015/seed_0 alpha=0.6: 12/12 correct, 0 unfilled; CONVERGED
+[19/143] mixed_015/seed_0 alpha=0.7: 10/12 correct, 0 unfilled; CONVERGED
+[20/143] mixed_015/seed_0 alpha=0.8: 9/12 correct, 0 unfilled; CONVERGED
+[21/143] mixed_015/seed_0 alpha=0.9: 8/12 correct, 0 unfilled; CONVERGED
+[22/143] mixed_015/seed_0 alpha=1: 7/12 correct, 0 unfilled; CONVERGED
+[mixed_015/seed_1] corrupting and profiling once ...
+[23/143] mixed_015/seed_1 alpha=0: 12/12 correct, 0 unfilled; CONVERGED
+[24/143] mixed_015/seed_1 alpha=0.1: 12/12 correct, 0 unfilled; CONVERGED
+[25/143] mixed_015/seed_1 alpha=0.2: 12/12 correct, 0 unfilled; CONVERGED
+[26/143] mixed_015/seed_1 alpha=0.3: 11/12 correct, 0 unfilled; CONVERGED
+[27/143] mixed_015/seed_1 alpha=0.4: 10/12 correct, 0 unfilled; CONVERGED
+[28/143] mixed_015/seed_1 alpha=0.5: 12/12 correct, 0 unfilled; CONVERGED
+[29/143] mixed_015/seed_1 alpha=0.6: 12/12 correct, 0 unfilled; CONVERGED
+[30/143] mixed_015/seed_1 alpha=0.7: 10/12 correct, 0 unfilled; CONVERGED
+[31/143] mixed_015/seed_1 alpha=0.8: 9/12 correct, 0 unfilled; CONVERGED
+[32/143] mixed_015/seed_1 alpha=0.9: 8/12 correct, 0 unfilled; CONVERGED
+[33/143] mixed_015/seed_1 alpha=1: 7/12 correct, 0 unfilled; CONVERGED
+[mixed_015/seed_2] corrupting and profiling once ...
+[34/143] mixed_015/seed_2 alpha=0: 12/12 correct, 0 unfilled; CONVERGED
+[35/143] mixed_015/seed_2 alpha=0.1: 12/12 correct, 0 unfilled; CONVERGED
+[36/143] mixed_015/seed_2 alpha=0.2: 12/12 correct, 0 unfilled; CONVERGED
+[37/143] mixed_015/seed_2 alpha=0.3: 11/12 correct, 0 unfilled; CONVERGED
+[38/143] mixed_015/seed_2 alpha=0.4: 10/12 correct, 0 unfilled; CONVERGED
+[39/143] mixed_015/seed_2 alpha=0.5: 12/12 correct, 0 unfilled; CONVERGED
+[40/143] mixed_015/seed_2 alpha=0.6: 12/12 correct, 0 unfilled; CONVERGED
+[41/143] mixed_015/seed_2 alpha=0.7: 12/12 correct, 0 unfilled; CONVERGED
+[42/143] mixed_015/seed_2 alpha=0.8: 9/12 correct, 0 unfilled; CONVERGED
+[43/143] mixed_015/seed_2 alpha=0.9: 8/12 correct, 0 unfilled; CONVERGED
+[44/143] mixed_015/seed_2 alpha=1: 7/12 correct, 0 unfilled; CONVERGED
+[mixed_030/seed_0] corrupting and profiling once ...
+[45/143] mixed_030/seed_0 alpha=0: 9/12 correct, 0 unfilled; CONVERGED
+[46/143] mixed_030/seed_0 alpha=0.1: 9/12 correct, 0 unfilled; CONVERGED
+[47/143] mixed_030/seed_0 alpha=0.2: 9/12 correct, 0 unfilled; CONVERGED
+[48/143] mixed_030/seed_0 alpha=0.3: 10/12 correct, 0 unfilled; CONVERGED
+[49/143] mixed_030/seed_0 alpha=0.4: 10/12 correct, 0 unfilled; CONVERGED
+[50/143] mixed_030/seed_0 alpha=0.5: 10/12 correct, 0 unfilled; CONVERGED
+[51/143] mixed_030/seed_0 alpha=0.6: 10/12 correct, 0 unfilled; CONVERGED
+[52/143] mixed_030/seed_0 alpha=0.7: 10/12 correct, 0 unfilled; CONVERGED
+[53/143] mixed_030/seed_0 alpha=0.8: 6/12 correct, 0 unfilled; CONVERGED
+[54/143] mixed_030/seed_0 alpha=0.9: 8/12 correct, 0 unfilled; CONVERGED
+[55/143] mixed_030/seed_0 alpha=1: 6/12 correct, 0 unfilled; CONVERGED
+[mixed_030/seed_1] corrupting and profiling once ...
+[56/143] mixed_030/seed_1 alpha=0: 9/12 correct, 0 unfilled; CONVERGED
+[57/143] mixed_030/seed_1 alpha=0.1: 9/12 correct, 0 unfilled; CONVERGED
+[58/143] mixed_030/seed_1 alpha=0.2: 9/12 correct, 0 unfilled; CONVERGED
+[59/143] mixed_030/seed_1 alpha=0.3: 10/12 correct, 0 unfilled; CONVERGED
+[60/143] mixed_030/seed_1 alpha=0.4: 10/12 correct, 0 unfilled; CONVERGED
+[61/143] mixed_030/seed_1 alpha=0.5: 10/12 correct, 0 unfilled; CONVERGED
+[62/143] mixed_030/seed_1 alpha=0.6: 10/12 correct, 0 unfilled; CONVERGED
+[63/143] mixed_030/seed_1 alpha=0.7: 10/12 correct, 0 unfilled; CONVERGED
+[64/143] mixed_030/seed_1 alpha=0.8: 6/12 correct, 0 unfilled; CONVERGED
+[65/143] mixed_030/seed_1 alpha=0.9: 8/12 correct, 0 unfilled; CONVERGED
+[66/143] mixed_030/seed_1 alpha=1: 6/12 correct, 0 unfilled; CONVERGED
+[mixed_030/seed_2] corrupting and profiling once ...
+[67/143] mixed_030/seed_2 alpha=0: 9/12 correct, 0 unfilled; CONVERGED
+[68/143] mixed_030/seed_2 alpha=0.1: 9/12 correct, 0 unfilled; CONVERGED
+[69/143] mixed_030/seed_2 alpha=0.2: 9/12 correct, 0 unfilled; CONVERGED
+[70/143] mixed_030/seed_2 alpha=0.3: 10/12 correct, 0 unfilled; CONVERGED
+[71/143] mixed_030/seed_2 alpha=0.4: 10/12 correct, 0 unfilled; CONVERGED
+[72/143] mixed_030/seed_2 alpha=0.5: 10/12 correct, 0 unfilled; CONVERGED
+[73/143] mixed_030/seed_2 alpha=0.6: 10/12 correct, 0 unfilled; CONVERGED
+[74/143] mixed_030/seed_2 alpha=0.7: 10/12 correct, 0 unfilled; CONVERGED
+[75/143] mixed_030/seed_2 alpha=0.8: 6/12 correct, 0 unfilled; CONVERGED
+[76/143] mixed_030/seed_2 alpha=0.9: 8/12 correct, 0 unfilled; CONVERGED
+[77/143] mixed_030/seed_2 alpha=1: 6/12 correct, 0 unfilled; CONVERGED
+[categorical_015/seed_0] corrupting and profiling once ...
+[78/143] categorical_015/seed_0 alpha=0: 12/12 correct, 0 unfilled; CONVERGED
+[79/143] categorical_015/seed_0 alpha=0.1: 12/12 correct, 0 unfilled; CONVERGED
+[80/143] categorical_015/seed_0 alpha=0.2: 12/12 correct, 0 unfilled; CONVERGED
+[81/143] categorical_015/seed_0 alpha=0.3: 11/12 correct, 0 unfilled; CONVERGED
+[82/143] categorical_015/seed_0 alpha=0.4: 10/12 correct, 0 unfilled; CONVERGED
+[83/143] categorical_015/seed_0 alpha=0.5: 12/12 correct, 0 unfilled; CONVERGED
+[84/143] categorical_015/seed_0 alpha=0.6: 12/12 correct, 0 unfilled; CONVERGED
+[85/143] categorical_015/seed_0 alpha=0.7: 10/12 correct, 0 unfilled; CONVERGED
+[86/143] categorical_015/seed_0 alpha=0.8: 9/12 correct, 0 unfilled; CONVERGED
+[87/143] categorical_015/seed_0 alpha=0.9: 8/12 correct, 0 unfilled; CONVERGED
+[88/143] categorical_015/seed_0 alpha=1: 7/12 correct, 0 unfilled; CONVERGED
+[categorical_015/seed_1] corrupting and profiling once ...
+[89/143] categorical_015/seed_1 alpha=0: 12/12 correct, 0 unfilled; CONVERGED
+[90/143] categorical_015/seed_1 alpha=0.1: 12/12 correct, 0 unfilled; CONVERGED
+[91/143] categorical_015/seed_1 alpha=0.2: 12/12 correct, 0 unfilled; CONVERGED
+[92/143] categorical_015/seed_1 alpha=0.3: 11/12 correct, 0 unfilled; CONVERGED
+[93/143] categorical_015/seed_1 alpha=0.4: 10/12 correct, 0 unfilled; CONVERGED
+[94/143] categorical_015/seed_1 alpha=0.5: 12/12 correct, 0 unfilled; CONVERGED
+[95/143] categorical_015/seed_1 alpha=0.6: 12/12 correct, 0 unfilled; CONVERGED
+[96/143] categorical_015/seed_1 alpha=0.7: 10/12 correct, 0 unfilled; CONVERGED
+[97/143] categorical_015/seed_1 alpha=0.8: 9/12 correct, 0 unfilled; CONVERGED
+[98/143] categorical_015/seed_1 alpha=0.9: 8/12 correct, 0 unfilled; CONVERGED
+[99/143] categorical_015/seed_1 alpha=1: 7/12 correct, 0 unfilled; CONVERGED
+[categorical_015/seed_2] corrupting and profiling once ...
+[100/143] categorical_015/seed_2 alpha=0: 12/12 correct, 0 unfilled; CONVERGED
+[101/143] categorical_015/seed_2 alpha=0.1: 12/12 correct, 0 unfilled; CONVERGED
+[102/143] categorical_015/seed_2 alpha=0.2: 12/12 correct, 0 unfilled; CONVERGED
+[103/143] categorical_015/seed_2 alpha=0.3: 11/12 correct, 0 unfilled; CONVERGED
+[104/143] categorical_015/seed_2 alpha=0.4: 10/12 correct, 0 unfilled; CONVERGED
+[105/143] categorical_015/seed_2 alpha=0.5: 12/12 correct, 0 unfilled; CONVERGED
+[106/143] categorical_015/seed_2 alpha=0.6: 12/12 correct, 0 unfilled; CONVERGED
+[107/143] categorical_015/seed_2 alpha=0.7: 12/12 correct, 0 unfilled; CONVERGED
+[108/143] categorical_015/seed_2 alpha=0.8: 9/12 correct, 0 unfilled; CONVERGED
+[109/143] categorical_015/seed_2 alpha=0.9: 8/12 correct, 0 unfilled; CONVERGED
+[110/143] categorical_015/seed_2 alpha=1: 7/12 correct, 0 unfilled; CONVERGED
+[numeric_015/seed_0] corrupting and profiling once ...
+[111/143] numeric_015/seed_0 alpha=0: 12/12 correct, 0 unfilled; CONVERGED
+[112/143] numeric_015/seed_0 alpha=0.1: 12/12 correct, 0 unfilled; CONVERGED
+[113/143] numeric_015/seed_0 alpha=0.2: 12/12 correct, 0 unfilled; CONVERGED
+[114/143] numeric_015/seed_0 alpha=0.3: 12/12 correct, 0 unfilled; CONVERGED
+[115/143] numeric_015/seed_0 alpha=0.4: 12/12 correct, 0 unfilled; CONVERGED
+[116/143] numeric_015/seed_0 alpha=0.5: 12/12 correct, 0 unfilled; CONVERGED
+[117/143] numeric_015/seed_0 alpha=0.6: 12/12 correct, 0 unfilled; CONVERGED
+[118/143] numeric_015/seed_0 alpha=0.7: 12/12 correct, 0 unfilled; CONVERGED
+[119/143] numeric_015/seed_0 alpha=0.8: 12/12 correct, 0 unfilled; CONVERGED
+[120/143] numeric_015/seed_0 alpha=0.9: 12/12 correct, 0 unfilled; CONVERGED
+[121/143] numeric_015/seed_0 alpha=1: 12/12 correct, 0 unfilled; CONVERGED
+[numeric_015/seed_1] corrupting and profiling once ...
+[122/143] numeric_015/seed_1 alpha=0: 12/12 correct, 0 unfilled; CONVERGED
+[123/143] numeric_015/seed_1 alpha=0.1: 12/12 correct, 0 unfilled; CONVERGED
+[124/143] numeric_015/seed_1 alpha=0.2: 12/12 correct, 0 unfilled; CONVERGED
+[125/143] numeric_015/seed_1 alpha=0.3: 12/12 correct, 0 unfilled; CONVERGED
+[126/143] numeric_015/seed_1 alpha=0.4: 12/12 correct, 0 unfilled; CONVERGED
+[127/143] numeric_015/seed_1 alpha=0.5: 12/12 correct, 0 unfilled; CONVERGED
+[128/143] numeric_015/seed_1 alpha=0.6: 12/12 correct, 0 unfilled; CONVERGED
+[129/143] numeric_015/seed_1 alpha=0.7: 12/12 correct, 0 unfilled; CONVERGED
+[130/143] numeric_015/seed_1 alpha=0.8: 12/12 correct, 0 unfilled; CONVERGED
+[131/143] numeric_015/seed_1 alpha=0.9: 12/12 correct, 0 unfilled; CONVERGED
+[132/143] numeric_015/seed_1 alpha=1: 12/12 correct, 0 unfilled; CONVERGED
+[numeric_015/seed_2] corrupting and profiling once ...
+[133/143] numeric_015/seed_2 alpha=0: 12/12 correct, 0 unfilled; CONVERGED
+[134/143] numeric_015/seed_2 alpha=0.1: 12/12 correct, 0 unfilled; CONVERGED
+[135/143] numeric_015/seed_2 alpha=0.2: 12/12 correct, 0 unfilled; CONVERGED
+[136/143] numeric_015/seed_2 alpha=0.3: 12/12 correct, 0 unfilled; CONVERGED
+[137/143] numeric_015/seed_2 alpha=0.4: 12/12 correct, 0 unfilled; CONVERGED
+[138/143] numeric_015/seed_2 alpha=0.5: 12/12 correct, 0 unfilled; CONVERGED
+[139/143] numeric_015/seed_2 alpha=0.6: 12/12 correct, 0 unfilled; CONVERGED
+[140/143] numeric_015/seed_2 alpha=0.7: 12/12 correct, 0 unfilled; CONVERGED
+[141/143] numeric_015/seed_2 alpha=0.8: 12/12 correct, 0 unfilled; CONVERGED
+[142/143] numeric_015/seed_2 alpha=0.9: 12/12 correct, 0 unfilled; CONVERGED
+[143/143] numeric_015/seed_2 alpha=1: 12/12 correct, 0 unfilled; CONVERGED
+Completed 143/143; results: /mnt/storage/d.tanyushkina/transactions/testing_alpha/results.csv
